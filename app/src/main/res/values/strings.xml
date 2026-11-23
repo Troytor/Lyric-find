@@ -1,0 +1,52 @@
+<resources>
+    <string name="app_name">Cadence</string>
+
+    <!-- Listen Screen -->
+    <string name="listen_headline_idle">Tap to hear the song</string>
+    <string name="listen_subtitle_idle">Listens to live vocals, fetches synced lyrics, and locks word pace to the beat</string>
+    <string name="listen_headline_active">Listening to vocals…</string>
+    <string name="listen_headline_matching">Matching lyrics online…</string>
+    <string name="listen_headline_loading">Building word cadence…</string>
+    <string name="listen_tap_to_stop">Tap orb to cancel</string>
+    <string name="listen_search_pill">Search any song or artist</string>
+    <string name="listen_mic_permission_needed">Microphone access is required to hear songs and sync lyrics to the live beat.</string>
+    <string name="listen_mic_permission_grant">Enable Microphone</string>
+    <string name="listen_no_match_tip">Move closer to the speaker during vocals, or search the track directly.</string>
+
+    <!-- Search Sheet -->
+    <string name="search_title">Find Track</string>
+    <string name="search_placeholder">Song title, artist, or lyric line…</string>
+    <string name="search_empty_prompt">Search live across LRCLIB, iTunes, and Deezer for real synced lyrics and tempo metadata.</string>
+    <string name="search_no_results">No synced tracks found for this query. Try another title or artist.</string>
+    <string name="search_synced_badge">SYNCED</string>
+    <string name="search_plain_badge">PLAIN</string>
+
+    <!-- Lyrics Stage -->
+    <string name="lyrics_back_cd">Back to listening</string>
+    <string name="lyrics_search_cd">Search another song</string>
+    <string name="lyrics_play_cd">Resume lyric playback</string>
+    <string name="lyrics_pause_cd">Pause lyric playback</string>
+    <string name="lyrics_mic_sync_on">Live Mic Sync</string>
+    <string name="lyrics_mic_sync_off">Mic Sync Off</string>
+    <string name="lyrics_relock_vocals">Re-lock</string>
+    <string name="lyrics_relocking">Hearing line…</string>
+    <string name="lyrics_return_to_live">Return to live</string>
+    <string name="lyrics_calibration_cd">Open acoustic sync calibration</string>
+    <string name="lyrics_album_art_cd">Album artwork</string>
+    <string name="lyrics_instrumental_label">Instrumental</string>
+    <string name="lyrics_no_lyrics_available">No lyrics were returned by LRCLIB for this track.</string>
+
+    <!-- Acoustic Calibration & Engine Sheet -->
+    <string name="engine_sheet_title">Acoustic Sync Engine</string>
+    <string name="engine_live_spectrum">LIVE MICROPHONE SPECTRUM</string>
+    <string name="engine_detected_bpm">LIVE MIC BPM</string>
+    <string name="engine_track_bpm">TRACK BPM</string>
+    <string name="engine_tempo_lock">BEAT PLL</string>
+    <string name="engine_offset_title">Timing Offset</string>
+    <string name="engine_offset_reset">Reset</string>
+    <string name="engine_timing_source">WORD PACING MODEL</string>
+    <string name="engine_source_enhanced">Enhanced LRC Word Tags</string>
+    <string name="engine_source_ml">On-Device Prosodic + Beat ML Engine</string>
+    <string name="engine_source_plain">Tempo-Distributed Plain Lyrics</string>
+    <string name="engine_firebase_notice">Running 100% locally with on-device prosodic ML and live microphone FFT beat detection. Optional cloud Gemini vocal profiling requires Firebase.</string>
+</resources>

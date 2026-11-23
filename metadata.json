@@ -1,0 +1,6 @@
+{
+  "name": "Cadence",
+  "description": "Real-time microphone song recognition and word-by-word synced lyrics powered by acoustic beat detection, free music APIs, and ML vocal pacing.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
