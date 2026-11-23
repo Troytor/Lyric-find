@@ -42,11 +42,15 @@
     <string name="engine_detected_bpm">LIVE MIC BPM</string>
     <string name="engine_track_bpm">TRACK BPM</string>
     <string name="engine_tempo_lock">BEAT PLL</string>
+    <string name="engine_neural_vocal">AI VOCAL</string>
+    <string name="engine_neural_beat">AI BEAT</string>
+    <string name="engine_acoustic_drift">DRIFT LOCK</string>
     <string name="engine_offset_title">Timing Offset</string>
     <string name="engine_offset_reset">Reset</string>
-    <string name="engine_timing_source">WORD PACING MODEL</string>
+    <string name="engine_timing_source">LOCAL NEURAL MODEL</string>
     <string name="engine_source_enhanced">Enhanced LRC Word Tags</string>
-    <string name="engine_source_ml">On-Device Prosodic + Beat ML Engine</string>
+    <string name="engine_source_ml">CadenceNet-Nano · Local Neural Engine</string>
     <string name="engine_source_plain">Tempo-Distributed Plain Lyrics</string>
-    <string name="engine_firebase_notice">Running 100% locally with on-device prosodic ML and live microphone FFT beat detection. Optional cloud Gemini vocal profiling requires Firebase.</string>
+    <string name="engine_firebase_notice">CadenceNet-Nano runs 100% locally on-device for vocal activity detection, acoustic drift lock, and word pacing.</string>
+    <string name="lyrics_waiting_for_music">Waiting for room audio…</string>
 </resources>

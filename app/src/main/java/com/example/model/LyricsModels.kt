@@ -25,7 +25,7 @@ data class LyricLine(
 
 enum class TimingSource {
     ENHANCED_LRC,
-    ML_PROSODIC_BEAT_ENGINE,
+    LOCAL_NEURAL_CADENCE_ENGINE,
     PLAIN_ESTIMATED,
 }
 
@@ -74,6 +74,12 @@ data class AudioTelemetry(
     val tempoLockRatio: Float = 1f,
     val beatCount: Int = 0,
     val isVocalActive: Boolean = false,
+    val neuralVocalProb: Float = 0f,
+    val neuralBeatProb: Float = 0f,
+    val neuralMusicProb: Float = 0f,
+    val estimatedDriftMs: Long = 0L,
+    val driftConfidence: Float = 0f,
+    val isMusicPausedInRoom: Boolean = false,
 )
 
 enum class AppStage {

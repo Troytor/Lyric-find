@@ -220,7 +220,7 @@ fun CadenceAppRoot(
                 telemetry = uiState.telemetry,
                 syncOffsetMs = uiState.syncOffsetMs,
                 isMicSyncEnabled = uiState.isMicSyncEnabled,
-                cloudNotice = uiState.cloudPacingNotice,
+                cloudNotice = uiState.localAiSummary,
                 palette = uiState.ambientPalette,
                 onAdjustOffset = { delta -> viewModel.adjustSyncOffset(delta) },
                 onResetOffset = { viewModel.resetSyncOffset() },

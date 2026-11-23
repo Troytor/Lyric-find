@@ -167,6 +167,39 @@ fun SyncEngineBottomSheet(
                 )
             }
 
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Local CadenceNet-Nano neural inference telemetry row
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                MetricGlassTile(
+                    label = stringResource(R.string.engine_neural_vocal),
+                    value = if (isMicSyncEnabled) "${(telemetry.neuralVocalProb * 100f).roundToInt()}%" else "—",
+                    accent = palette.highlightTint,
+                    modifier = Modifier.weight(1f),
+                )
+                MetricGlassTile(
+                    label = stringResource(R.string.engine_neural_beat),
+                    value = if (isMicSyncEnabled) "${(telemetry.neuralBeatProb * 100f).roundToInt()}%" else "—",
+                    accent = Color.White,
+                    modifier = Modifier.weight(1f),
+                )
+                val driftText = if (isMicSyncEnabled && telemetry.driftConfidence >= 0.35f) {
+                    val sign = if (telemetry.estimatedDriftMs >= 0) "+" else ""
+                    "${sign}${telemetry.estimatedDriftMs}ms"
+                } else {
+                    "Locked"
+                }
+                MetricGlassTile(
+                    label = stringResource(R.string.engine_acoustic_drift),
+                    value = if (isMicSyncEnabled) driftText else "—",
+                    accent = palette.highlightTint,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+
             Spacer(modifier = Modifier.height(20.dp))
 
             // Millisecond timing offset controls
@@ -210,7 +243,7 @@ fun SyncEngineBottomSheet(
             // Word pacing engine source info
             val sourceLabel = when (track.timingSource) {
                 TimingSource.ENHANCED_LRC -> stringResource(R.string.engine_source_enhanced)
-                TimingSource.ML_PROSODIC_BEAT_ENGINE -> stringResource(R.string.engine_source_ml)
+                TimingSource.LOCAL_NEURAL_CADENCE_ENGINE -> stringResource(R.string.engine_source_ml)
                 TimingSource.PLAIN_ESTIMATED -> stringResource(R.string.engine_source_plain)
             }
             Box(

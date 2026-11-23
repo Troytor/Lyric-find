@@ -11,6 +11,7 @@ import com.example.data.remote.MusicRepository
 import com.example.engine.AcousticBeatEngine
 import com.example.engine.ArtworkPaletteExtractor
 import com.example.engine.CloudAiPacingRepository
+import com.example.engine.LocalCadenceNeuralNet
 import com.example.engine.LocalOnDevicePacingRepository
 import com.example.engine.VocalCaptureController
 import com.example.engine.VocalCaptureEvent
@@ -70,20 +71,23 @@ data class CadenceUiState(
     val isLoadingTrack: Boolean = false,
     val isCalibrationOpen: Boolean = false,
     val errorBanner: String? = null,
-    val cloudPacingNotice: String = "",
+    val localAiSummary: String = "",
+    val autoPausedBySilence: Boolean = false,
+    val lastDriftCorrectionMs: Long = 0L,
 )
 
 class CadenceViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val repository = MusicRepository()
-    private val pacingEngine = WordPacingMlEngine()
-    private val beatEngine = AcousticBeatEngine()
+    private val localNeuralNet = LocalCadenceNeuralNet()
+    private val pacingEngine = WordPacingMlEngine(localNeuralNet)
+    private val repository = MusicRepository(neuralNet = localNeuralNet, pacingEngine = pacingEngine)
+    private val beatEngine = AcousticBeatEngine(localNeuralNet)
     private val vocalCapture = VocalCaptureController(application.applicationContext)
-    private val cloudPacingRepo: CloudAiPacingRepository = LocalOnDevicePacingRepository()
+    private val localAiInfoRepo: CloudAiPacingRepository = LocalOnDevicePacingRepository(localNeuralNet)
 
     private val _uiState = MutableStateFlow(
         CadenceUiState(
-            cloudPacingNotice = cloudPacingRepo.getCloudStatus().statusNote,
+            localAiSummary = localAiInfoRepo.getCloudStatus().statusNote,
         ),
     )
     val uiState: StateFlow<CadenceUiState> = _uiState.asStateFlow()
@@ -92,7 +96,9 @@ class CadenceViewModel(application: Application) : AndroidViewModel(application)
     private var searchJob: Job? = null
     private var identifyJob: Job? = null
     private var lastAppliedLiveBpm: Float? = null
-    private var lastPartialQueryWordCount = 0
+    private var lastQueriedPhrase = ""
+    private var lastDriftCorrectionAtMs = 0L
+    private var userManuallyPaused = false
 
     fun toggleListeningForSong() {
         val mode = _uiState.value.micMode
@@ -113,30 +119,36 @@ class CadenceViewModel(application: Application) : AndroidViewModel(application)
     fun startSongIdentification() {
         stopBeatSyncEngine()
         identifyJob?.cancel()
-        lastPartialQueryWordCount = 0
+        lastQueriedPhrase = ""
 
         _uiState.update {
             it.copy(
                 stage = AppStage.LISTEN,
                 micMode = MicMode.IDENTIFYING,
                 liveTranscript = "",
-                statusDetail = null,
+                statusDetail = "Listening for vocals…",
                 errorBanner = null,
             )
         }
 
-        vocalCapture.start { event ->
+        vocalCapture.startContinuous(maxSessionMs = 26_000L) { event ->
             when (event) {
                 is VocalCaptureEvent.Ready -> {
-                    _uiState.update { it.copy(micMode = MicMode.IDENTIFYING) }
+                    _uiState.update {
+                        if (it.micMode == MicMode.IDENTIFYING) {
+                            it.copy(statusDetail = "Listening for vocals…")
+                        } else {
+                            it
+                        }
+                    }
                 }
 
                 is VocalCaptureEvent.Level -> {
                     _uiState.update { state ->
                         val pulseBands = List(16) { idx ->
-                            val phase = ((idx * 0.45f) + event.normalized * 4f)
+                            val phase = ((idx * 0.45f) + event.normalized * 4.5f)
                             val wave = (kotlin.math.sin(phase.toDouble()).toFloat() * 0.25f) + 0.75f
-                            (event.normalized * wave).coerceIn(0.05f, 1f)
+                            (event.normalized * wave).coerceIn(0.06f, 1f)
                         }
                         state.copy(
                             telemetry = state.telemetry.copy(
@@ -148,30 +160,55 @@ class CadenceViewModel(application: Application) : AndroidViewModel(application)
                     }
                 }
 
-                is VocalCaptureEvent.PartialPhrase -> {
-                    _uiState.update { it.copy(liveTranscript = event.phrase) }
-                    val wordCount = event.phrase.split(Regex("\\s+")).count { it.length >= 2 }
-                    if (wordCount >= 4 && wordCount >= lastPartialQueryWordCount + 2) {
-                        lastPartialQueryWordCount = wordCount
-                        attemptIdentifyFromPhrase(event.phrase, isFinal = false)
+                is VocalCaptureEvent.RollingPhrase -> {
+                    val displayPhrase = event.accumulatedBuffer.ifBlank { event.latestSegment }
+                    _uiState.update {
+                        it.copy(
+                            liveTranscript = displayPhrase,
+                            statusDetail = "Analyzing lyrics with local AI…",
+                        )
+                    }
+                    val wordCount = displayPhrase.split(Regex("\\s+")).count { it.length >= 2 }
+                    val enoughNewWords = displayPhrase != lastQueriedPhrase &&
+                        (event.isSegmentFinal && wordCount >= 3 || wordCount >= 4)
+
+                    if (enoughNewWords) {
+                        lastQueriedPhrase = displayPhrase
+                        attemptIdentifyFromPhrase(
+                            phrase = displayPhrase,
+                            observedAtElapsedMs = event.observedAtElapsedMs,
+                            allowLowThreshold = event.isSegmentFinal && wordCount >= 5,
+                        )
                     }
                 }
 
-                is VocalCaptureEvent.FinalPhrase -> {
-                    _uiState.update { it.copy(liveTranscript = event.phrase) }
-                    attemptIdentifyFromPhrase(event.phrase, isFinal = true)
+                is VocalCaptureEvent.Retrying -> {
+                    _uiState.update {
+                        if (it.micMode == MicMode.IDENTIFYING) {
+                            it.copy(statusDetail = "Listening for next vocal phrase…")
+                        } else {
+                            it
+                        }
+                    }
                 }
 
                 is VocalCaptureEvent.Stopped -> {
-                    if (_uiState.value.micMode == MicMode.IDENTIFYING) {
+                    if (_uiState.value.micMode == MicMode.IDENTIFYING || _uiState.value.micMode == MicMode.MATCHING_ONLINE) {
                         val transcript = _uiState.value.liveTranscript
-                        if (transcript.split(Regex("\\s+")).count { it.length >= 2 } >= 3) {
-                            attemptIdentifyFromPhrase(transcript, isFinal = true)
-                        } else {
+                        if (transcript.split(Regex("\\s+")).count { it.length >= 2 } >= 3 && identifyJob?.isActive != true) {
+                            attemptIdentifyFromPhrase(
+                                phrase = transcript,
+                                observedAtElapsedMs = SystemClock.elapsedRealtime(),
+                                allowLowThreshold = true,
+                                stopOnMiss = true,
+                            )
+                        } else if (identifyJob?.isActive != true) {
                             _uiState.update {
                                 it.copy(
                                     micMode = MicMode.IDLE,
-                                    errorBanner = event.reason ?: "No vocals heard yet. Tap the orb while singing plays or search directly.",
+                                    statusDetail = null,
+                                    errorBanner = event.reason
+                                        ?: "No clear vocals caught yet. Hold near the speaker during singing or search directly.",
                                 )
                             }
                         }
@@ -181,38 +218,63 @@ class CadenceViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    private fun attemptIdentifyFromPhrase(phrase: String, isFinal: Boolean) {
-        if (identifyJob?.isActive == true && !isFinal) return
+    private fun attemptIdentifyFromPhrase(
+        phrase: String,
+        observedAtElapsedMs: Long,
+        allowLowThreshold: Boolean,
+        stopOnMiss: Boolean = false,
+    ) {
+        if (identifyJob?.isActive == true && !stopOnMiss) return
         identifyJob?.cancel()
-        val captureEpochMs = SystemClock.elapsedRealtime()
 
         identifyJob = viewModelScope.launch {
-            if (isFinal) {
-                _uiState.update { it.copy(micMode = MicMode.MATCHING_ONLINE) }
-            }
+            _uiState.update { it.copy(statusDetail = "Matching full-text lyrics online…") }
             try {
                 val match = repository.identifySongFromVocalTranscript(phrase)
-                if (match != null) {
+                val requiredScore = if (allowLowThreshold) 0.44f else 0.56f
+                if (match != null && match.matchScore >= requiredScore) {
                     vocalCapture.stop()
-                    val networkLatencyMs = (SystemClock.elapsedRealtime() - captureEpochMs).coerceIn(400L, 4_500L)
-                    val startMs = ((match.matchedLineStartMs ?: 0L) + networkLatencyMs).coerceAtLeast(0L)
-                    openCandidateTrack(match, initialPositionMs = startMs, autoStartMicSync = true)
-                } else if (isFinal) {
+                    val elapsedSinceObserved = (SystemClock.elapsedRealtime() - observedAtElapsedMs)
+                        .coerceIn(350L, 6_500L)
+                    // Add ~650ms SpeechRecognizer acoustic lag + elapsed network fetch time
+                    val syncedStartMs = if (match.matchedLineStartMs != null) {
+                        (match.matchedLineStartMs + elapsedSinceObserved + 650L).coerceAtLeast(0L)
+                    } else {
+                        0L
+                    }
+                    openCandidateTrack(
+                        candidate = match,
+                        initialPositionMs = syncedStartMs,
+                        autoStartMicSync = true,
+                        autoRelockAfterLoad = match.matchedLineStartMs == null,
+                    )
+                } else if (stopOnMiss) {
                     _uiState.update {
                         it.copy(
                             micMode = MicMode.IDLE,
-                            errorBanner = "Couldn't match \"$phrase\" to a synced track. Try again closer to the speaker or use search.",
+                            statusDetail = null,
+                            errorBanner = "Couldn't confidently match \"$phrase\". Try closer to the speaker or search by title.",
                         )
+                    }
+                } else {
+                    // Keep listening smoothly for more sung words!
+                    _uiState.update {
+                        if (it.micMode == MicMode.IDENTIFYING) {
+                            it.copy(statusDetail = "Listening for a few more words…")
+                        } else {
+                            it
+                        }
                     }
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Song identification failed", e)
-                if (isFinal) {
+                if (stopOnMiss) {
                     _uiState.update {
                         it.copy(
                             micMode = MicMode.IDLE,
+                            statusDetail = null,
                             errorBanner = "Network lookup failed: ${e.localizedMessage ?: "check internet connection"}",
                         )
                     }
@@ -224,7 +286,12 @@ class CadenceViewModel(application: Application) : AndroidViewModel(application)
     fun selectSearchCandidate(candidate: SongCandidate) {
         _uiState.update { it.copy(isSearchOpen = false) }
         viewModelScope.launch {
-            openCandidateTrack(candidate, initialPositionMs = 0L, autoStartMicSync = _uiState.value.isMicSyncEnabled)
+            openCandidateTrack(
+                candidate = candidate,
+                initialPositionMs = 0L,
+                autoStartMicSync = _uiState.value.isMicSyncEnabled,
+                autoRelockAfterLoad = false,
+            )
         }
     }
 
@@ -232,11 +299,15 @@ class CadenceViewModel(application: Application) : AndroidViewModel(application)
         candidate: SongCandidate,
         initialPositionMs: Long,
         autoStartMicSync: Boolean,
+        autoRelockAfterLoad: Boolean,
     ) {
+        val loadStartedAtMs = SystemClock.elapsedRealtime()
+        userManuallyPaused = false
         _uiState.update {
             it.copy(
                 isLoadingTrack = true,
                 micMode = MicMode.MATCHING_ONLINE,
+                statusDetail = "Loading synced lyrics & tempo…",
                 errorBanner = null,
             )
         }
@@ -246,8 +317,14 @@ class CadenceViewModel(application: Application) : AndroidViewModel(application)
                 liveDetectedBpm = _uiState.value.telemetry.detectedBpm,
             )
             lastAppliedLiveBpm = syncedTrack.metadata.bpm
+            val loadElapsedMs = if (initialPositionMs > 0L) {
+                (SystemClock.elapsedRealtime() - loadStartedAtMs).coerceIn(0L, 6_000L)
+            } else {
+                0L
+            }
             val nowNanos = SystemClock.elapsedRealtimeNanos()
-            val clampedStart = initialPositionMs.coerceIn(0L, syncedTrack.metadata.durationMs.coerceAtLeast(1L))
+            val clampedStart = (initialPositionMs + loadElapsedMs)
+                .coerceIn(0L, syncedTrack.metadata.durationMs.coerceAtLeast(1L))
 
             _uiState.update {
                 it.copy(
@@ -263,10 +340,15 @@ class CadenceViewModel(application: Application) : AndroidViewModel(application)
                     isLoadingTrack = false,
                     micMode = if (autoStartMicSync) MicMode.BEAT_SYNCING else MicMode.IDLE,
                     liveTranscript = "",
+                    statusDetail = null,
+                    autoPausedBySilence = false,
+                    lastDriftCorrectionMs = 0L,
                     ambientPalette = AmbientPalette.DefaultIdle,
                 )
             }
-            if (autoStartMicSync) {
+            if (autoRelockAfterLoad && syncedTrack.lines.isNotEmpty()) {
+                relockCurrentLineWithMic(preferProximity = false)
+            } else if (autoStartMicSync) {
                 startBeatSyncEngine()
             }
         } catch (e: CancellationException) {
@@ -277,6 +359,7 @@ class CadenceViewModel(application: Application) : AndroidViewModel(application)
                 it.copy(
                     isLoadingTrack = false,
                     micMode = MicMode.IDLE,
+                    statusDetail = null,
                     errorBanner = "Could not load track lyrics: ${e.localizedMessage ?: "network error"}",
                 )
             }
@@ -286,18 +369,30 @@ class CadenceViewModel(application: Application) : AndroidViewModel(application)
     fun startBeatSyncEngine() {
         if (beatJob?.isActive == true) return
         vocalCapture.stop()
-        _uiState.update { it.copy(isMicSyncEnabled = true, micMode = MicMode.BEAT_SYNCING) }
+        _uiState.update {
+            it.copy(
+                isMicSyncEnabled = true,
+                micMode = MicMode.BEAT_SYNCING,
+                autoPausedBySilence = false,
+            )
+        }
 
         beatJob = viewModelScope.launch {
             beatEngine.observeLiveAudio(
                 referenceBpmProvider = { _uiState.value.activeTrack?.metadata?.bpm },
+                currentTrackPosMsProvider = {
+                    val s = _uiState.value
+                    (s.clockAnchor.currentPositionMs() + s.syncOffsetMs).coerceAtLeast(0L)
+                },
+                activeLinesProvider = { _uiState.value.activeTrack?.lines.orEmpty() },
+                isPlaybackRunningProvider = { _uiState.value.clockAnchor.isRunning },
             ).collect { telemetry ->
                 val state = _uiState.value
                 val track = state.activeTrack
 
-                // Dynamically refine word pacing if track had no Deezer BPM and live mic locked onto one
+                // Dynamically refine word pacing with CadenceNet-Nano when live mic locks a BPM
                 if (track != null &&
-                    track.timingSource == TimingSource.ML_PROSODIC_BEAT_ENGINE &&
+                    track.timingSource == TimingSource.LOCAL_NEURAL_CADENCE_ENGINE &&
                     telemetry.detectedBpm != null
                 ) {
                     val prev = lastAppliedLiveBpm
@@ -307,33 +402,75 @@ class CadenceViewModel(application: Application) : AndroidViewModel(application)
                             pacingEngine.refineWithLiveBpm(track.lines, telemetry.detectedBpm)
                         }
                         _uiState.update { cur ->
-                            cur.copy(
-                                activeTrack = cur.activeTrack?.copy(lines = refinedLines),
-                            )
+                            cur.copy(activeTrack = cur.activeTrack?.copy(lines = refinedLines))
                         }
                     }
                 }
 
-                // Update PLL clock rate gently when running
-                val currentAnchor = state.clockAnchor
-                val updatedAnchor = if (currentAnchor.isRunning &&
-                    abs(currentAnchor.rate - telemetry.tempoLockRatio) >= 0.008f
+                val nowMs = SystemClock.elapsedRealtime()
+                val nowNanos = SystemClock.elapsedRealtimeNanos()
+                var updatedAnchor = state.clockAnchor
+                var nextAutoPaused = state.autoPausedBySilence
+                var appliedDriftMs = state.lastDriftCorrectionMs
+
+                // 1. Real room music pause/resume gating via CadenceNet-Nano
+                if (!userManuallyPaused) {
+                    if (telemetry.isMusicPausedInRoom && updatedAnchor.isRunning) {
+                        updatedAnchor = PlaybackClockAnchor(
+                            basePositionMs = updatedAnchor.currentPositionMs(nowNanos),
+                            baseElapsedNanos = nowNanos,
+                            isRunning = false,
+                            rate = updatedAnchor.rate,
+                        )
+                        nextAutoPaused = true
+                    } else if (!telemetry.isMusicPausedInRoom && nextAutoPaused && !updatedAnchor.isRunning) {
+                        updatedAnchor = PlaybackClockAnchor(
+                            basePositionMs = updatedAnchor.basePositionMs,
+                            baseElapsedNanos = nowNanos,
+                            isRunning = true,
+                            rate = telemetry.tempoLockRatio,
+                        )
+                        nextAutoPaused = false
+                    }
+                }
+
+                // 2. Real acoustic vocal-envelope drift phase correction
+                if (updatedAnchor.isRunning &&
+                    telemetry.driftConfidence >= 0.38f &&
+                    abs(telemetry.estimatedDriftMs) >= 120L &&
+                    nowMs - lastDriftCorrectionAtMs >= 2_200L
                 ) {
-                    val nowNanos = SystemClock.elapsedRealtimeNanos()
-                    PlaybackClockAnchor(
-                        basePositionMs = currentAnchor.currentPositionMs(nowNanos),
+                    lastDriftCorrectionAtMs = nowMs
+                    val dampedPull = (telemetry.estimatedDriftMs * 0.38f).roundToLong()
+                        .coerceIn(-280L, 280L)
+                    val duration = track?.metadata?.durationMs ?: Long.MAX_VALUE
+                    val correctedPos = (updatedAnchor.currentPositionMs(nowNanos) + dampedPull)
+                        .coerceIn(0L, duration.coerceAtLeast(1L))
+                    updatedAnchor = PlaybackClockAnchor(
+                        basePositionMs = correctedPos,
                         baseElapsedNanos = nowNanos,
                         isRunning = true,
                         rate = telemetry.tempoLockRatio,
                     )
-                } else {
-                    currentAnchor
+                    appliedDriftMs = dampedPull
+                } else if (updatedAnchor.isRunning &&
+                    abs(updatedAnchor.rate - telemetry.tempoLockRatio) >= 0.008f
+                ) {
+                    // 3. Smooth tempo PLL rate update
+                    updatedAnchor = PlaybackClockAnchor(
+                        basePositionMs = updatedAnchor.currentPositionMs(nowNanos),
+                        baseElapsedNanos = nowNanos,
+                        isRunning = true,
+                        rate = telemetry.tempoLockRatio,
+                    )
                 }
 
                 _uiState.update {
                     it.copy(
                         telemetry = telemetry,
                         clockAnchor = updatedAnchor,
+                        autoPausedBySilence = nextAutoPaused,
+                        lastDriftCorrectionMs = appliedDriftMs,
                     )
                 }
             }
@@ -347,6 +484,7 @@ class CadenceViewModel(application: Application) : AndroidViewModel(application)
                 it.copy(
                     isMicSyncEnabled = false,
                     micMode = MicMode.IDLE,
+                    autoPausedBySilence = false,
                     telemetry = AudioTelemetry(),
                 )
             }
@@ -356,15 +494,15 @@ class CadenceViewModel(application: Application) : AndroidViewModel(application)
     }
 
     /**
-     * Momentarily listens to the current sung vocal line with SpeechRecognizer,
-     * aligns it against the active track's LRC lines, and snaps playback to that moment.
+     * Listens continuously for up to 12s to hear any live sung phrase, aligns it against
+     * the active track's lyrics with CadenceNet-Nano, and snaps playback to the exact moment.
      */
-    fun relockCurrentLineWithMic() {
+    fun relockCurrentLineWithMic(preferProximity: Boolean = false) {
         val track = _uiState.value.activeTrack ?: return
         if (_uiState.value.micMode == MicMode.RELOCKING_LINE) {
             vocalCapture.stop()
             if (_uiState.value.isMicSyncEnabled) startBeatSyncEngine() else {
-                _uiState.update { it.copy(micMode = MicMode.IDLE) }
+                _uiState.update { it.copy(micMode = MicMode.IDLE, liveTranscript = "") }
             }
             return
         }
@@ -386,7 +524,7 @@ class CadenceViewModel(application: Application) : AndroidViewModel(application)
             }
         }
 
-        vocalCapture.start { event ->
+        vocalCapture.startContinuous(maxSessionMs = 12_000L) { event ->
             when (event) {
                 is VocalCaptureEvent.Level -> {
                     _uiState.update {
@@ -394,38 +532,60 @@ class CadenceViewModel(application: Application) : AndroidViewModel(application)
                     }
                 }
 
-                is VocalCaptureEvent.PartialPhrase -> {
-                    _uiState.update { it.copy(liveTranscript = event.phrase) }
+                is VocalCaptureEvent.RollingPhrase -> {
+                    val phrase = event.latestSegment.ifBlank { event.accumulatedBuffer }
+                    _uiState.update { it.copy(liveTranscript = phrase) }
                     val currentPos = _uiState.value.clockAnchor.currentPositionMs()
-                    val matchedMs = repository.findBestRelockTimestamp(event.phrase, track.lines, currentPos)
-                    if (matchedMs != null && event.phrase.split(Regex("\\s+")).size >= 3) {
+                    val match = repository.findBestRelockTimestamp(
+                        heardPhrase = phrase,
+                        lines = track.lines,
+                        currentPositionMs = currentPos,
+                        preferProximity = preferProximity,
+                    ) ?: repository.findBestRelockTimestamp(
+                        heardPhrase = event.accumulatedBuffer,
+                        lines = track.lines,
+                        currentPositionMs = currentPos,
+                        preferProximity = preferProximity,
+                    )
+
+                    val wordCount = phrase.split(Regex("\\s+")).count { it.length >= 2 }
+                    val scoreGate = if (event.isSegmentFinal) 0.48f else 0.62f
+                    if (match != null && match.second >= scoreGate && wordCount >= 2) {
                         vocalCapture.stop()
-                        seekTo(matchedMs, resumeIfPaused = true)
-                        _uiState.update { it.copy(liveTranscript = "") }
+                        val latencyMs = (SystemClock.elapsedRealtime() - event.observedAtElapsedMs)
+                            .coerceIn(0L, 3_000L) + 550L
+                        userManuallyPaused = false
+                        seekTo(match.first + latencyMs, resumeIfPaused = true)
+                        _uiState.update { it.copy(liveTranscript = "", autoPausedBySilence = false) }
                         resumeBeatSync()
                     }
                 }
 
-                is VocalCaptureEvent.FinalPhrase -> {
-                    val currentPos = _uiState.value.clockAnchor.currentPositionMs()
-                    val matchedMs = repository.findBestRelockTimestamp(event.phrase, track.lines, currentPos)
-                    if (matchedMs != null) {
-                        seekTo(matchedMs, resumeIfPaused = true)
-                    } else {
-                        _uiState.update {
-                            it.copy(errorBanner = "Couldn't match line from \"${event.phrase}\". Tap any lyric line to snap.")
+                is VocalCaptureEvent.Stopped -> {
+                    val heard = _uiState.value.liveTranscript
+                    if (heard.isNotBlank()) {
+                        val currentPos = _uiState.value.clockAnchor.currentPositionMs()
+                        val fallback = repository.findBestRelockTimestamp(
+                            heardPhrase = heard,
+                            lines = track.lines,
+                            currentPositionMs = currentPos,
+                            preferProximity = false,
+                        )
+                        if (fallback != null) {
+                            userManuallyPaused = false
+                            seekTo(fallback.first + 550L, resumeIfPaused = true)
+                        } else {
+                            _uiState.update {
+                                it.copy(errorBanner = "Couldn't lock line from \"$heard\". Tap any lyric line to snap.")
+                            }
                         }
                     }
                     _uiState.update { it.copy(liveTranscript = "") }
                     resumeBeatSync()
                 }
 
-                is VocalCaptureEvent.Stopped -> {
-                    _uiState.update { it.copy(liveTranscript = "") }
-                    resumeBeatSync()
-                }
-
-                VocalCaptureEvent.Ready -> Unit
+                VocalCaptureEvent.Ready,
+                is VocalCaptureEvent.Retrying -> Unit
             }
         }
     }
@@ -435,7 +595,9 @@ class CadenceViewModel(application: Application) : AndroidViewModel(application)
         _uiState.update { state ->
             val currentPos = state.clockAnchor.currentPositionMs(nowNanos)
             val nextRunning = !state.clockAnchor.isRunning
+            userManuallyPaused = !nextRunning
             state.copy(
+                autoPausedBySilence = false,
                 clockAnchor = PlaybackClockAnchor(
                     basePositionMs = currentPos,
                     baseElapsedNanos = nowNanos,
@@ -450,8 +612,10 @@ class CadenceViewModel(application: Application) : AndroidViewModel(application)
         val duration = _uiState.value.activeTrack?.metadata?.durationMs ?: Long.MAX_VALUE
         val clamped = positionMs.coerceIn(0L, duration.coerceAtLeast(1L))
         val nowNanos = SystemClock.elapsedRealtimeNanos()
+        if (resumeIfPaused) userManuallyPaused = false
         _uiState.update { state ->
             state.copy(
+                autoPausedBySilence = false,
                 clockAnchor = PlaybackClockAnchor(
                     basePositionMs = clamped,
                     baseElapsedNanos = nowNanos,
@@ -524,6 +688,7 @@ class CadenceViewModel(application: Application) : AndroidViewModel(application)
 
     fun returnToListenStage() {
         stopAllMicTasks()
+        userManuallyPaused = false
         _uiState.update {
             it.copy(
                 stage = AppStage.LISTEN,
@@ -533,6 +698,8 @@ class CadenceViewModel(application: Application) : AndroidViewModel(application)
                 ambientPalette = AmbientPalette.DefaultIdle,
                 isCalibrationOpen = false,
                 liveTranscript = "",
+                statusDetail = null,
+                autoPausedBySilence = false,
             )
         }
     }

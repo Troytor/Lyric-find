@@ -172,9 +172,10 @@ private fun CompactPhoneLyricsLayout(
                 .padding(horizontal = 16.dp, vertical = 10.dp),
         )
 
-        // Live re-locking transcript pill above dock
+        // Live re-locking transcript pill or room-silence indicator above dock
+        val showStatusPill = uiState.micMode == MicMode.RELOCKING_LINE || uiState.autoPausedBySilence
         AnimatedVisibility(
-            visible = uiState.micMode == MicMode.RELOCKING_LINE,
+            visible = showStatusPill,
             enter = fadeIn(),
             exit = fadeOut(),
             modifier = Modifier
@@ -199,8 +200,13 @@ private fun CompactPhoneLyricsLayout(
                         modifier = Modifier.size(18.dp),
                     )
                     Spacer(modifier = Modifier.width(8.dp))
+                    val pillText = if (uiState.micMode == MicMode.RELOCKING_LINE) {
+                        uiState.liveTranscript.ifBlank { stringResource(R.string.lyrics_relocking) }
+                    } else {
+                        stringResource(R.string.lyrics_waiting_for_music)
+                    }
                     Text(
-                        text = uiState.liveTranscript.ifBlank { stringResource(R.string.lyrics_relocking) },
+                        text = pillText,
                         style = MaterialTheme.typography.labelLarge,
                         color = Color.White,
                         maxLines = 1,

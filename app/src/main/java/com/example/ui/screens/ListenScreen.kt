@@ -139,9 +139,18 @@ fun ListenScreen(
                             modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp),
                         )
                     }
+                    if (!uiState.statusDetail.isNullOrBlank()) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = uiState.statusDetail,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = Color.White.copy(alpha = 0.65f),
+                            textAlign = TextAlign.Center,
+                        )
+                    }
                 } else {
                     Text(
-                        text = if (uiState.micMode == MicMode.IDENTIFYING) {
+                        text = uiState.statusDetail ?: if (uiState.micMode == MicMode.IDENTIFYING) {
                             stringResource(R.string.listen_tap_to_stop)
                         } else {
                             stringResource(R.string.listen_subtitle_idle)

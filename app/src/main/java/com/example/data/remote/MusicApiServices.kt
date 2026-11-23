@@ -107,16 +107,86 @@ interface DeezerApi {
     suspend fun getTrackDetail(@Path("id") trackId: Long): DeezerTrackDetailDto
 }
 
+// Public full-text lyric search endpoints (returns song title & artist from sung lyric snippets)
+@JsonClass(generateAdapter = true)
+data class GeniusPublicSearchResponse(
+    val response: GeniusSectionsBody? = null,
+)
+
+@JsonClass(generateAdapter = true)
+data class GeniusSectionsBody(
+    val sections: List<GeniusSectionDto> = emptyList(),
+)
+
+@JsonClass(generateAdapter = true)
+data class GeniusSectionDto(
+    val type: String? = null,
+    val hits: List<GeniusHitDto> = emptyList(),
+)
+
+@JsonClass(generateAdapter = true)
+data class GeniusHitDto(
+    val type: String? = null,
+    val result: GeniusSongResultDto? = null,
+)
+
+@JsonClass(generateAdapter = true)
+data class GeniusSongResultDto(
+    val id: Long = 0L,
+    val title: String? = null,
+    @Json(name = "artist_names") val artistNames: String? = null,
+    @Json(name = "song_art_image_url") val songArtImageUrl: String? = null,
+    @Json(name = "primary_artist") val primaryArtist: GeniusArtistDto? = null,
+)
+
+@JsonClass(generateAdapter = true)
+data class GeniusArtistDto(
+    val name: String? = null,
+)
+
+interface GeniusPublicApi {
+    @GET("api/search/lyric")
+    suspend fun searchLyrics(
+        @Query("q") query: String,
+        @Query("per_page") perPage: Int = 8,
+    ): GeniusPublicSearchResponse
+
+    @GET("api/search/multi")
+    suspend fun searchMulti(
+        @Query("q") query: String,
+        @Query("per_page") perPage: Int = 6,
+    ): GeniusPublicSearchResponse
+}
+
 object MusicApiFactory {
     private val sharedClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
-            .connectTimeout(12, TimeUnit.SECONDS)
-            .readTimeout(15, TimeUnit.SECONDS)
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(14, TimeUnit.SECONDS)
             .addInterceptor { chain ->
                 val request = chain.request()
                     .newBuilder()
-                    .header("User-Agent", "CadenceAndroid/1.0 (Live Lyrics Sync)")
+                    .header("User-Agent", "CadenceAndroid/1.1 (https://cadence.local)")
                     .header("Accept", "application/json")
+                    .build()
+                chain.proceed(request)
+            }
+            .build()
+    }
+
+    private val webSearchClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(12, TimeUnit.SECONDS)
+            .addInterceptor { chain ->
+                val request = chain.request()
+                    .newBuilder()
+                    .header(
+                        "User-Agent",
+                        "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+                    )
+                    .header("Accept", "application/json, text/plain, */*")
+                    .header("X-Requested-With", "XMLHttpRequest")
                     .build()
                 chain.proceed(request)
             }
@@ -148,5 +218,14 @@ object MusicApiFactory {
             .addConverterFactory(MoshiConverterFactory.create())
             .build()
             .create(DeezerApi::class.java)
+    }
+
+    val genius: GeniusPublicApi by lazy {
+        Retrofit.Builder()
+            .baseUrl("https://genius.com/")
+            .client(webSearchClient)
+            .addConverterFactory(MoshiConverterFactory.create())
+            .build()
+            .create(GeniusPublicApi::class.java)
     }
 }
