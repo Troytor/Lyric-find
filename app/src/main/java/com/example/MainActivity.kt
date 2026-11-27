@@ -246,8 +246,10 @@ fun CadenceAppRoot(
                 query = uiState.searchQuery,
                 results = uiState.searchResults,
                 isSearching = uiState.isSearching,
+                selectedLanguage = uiState.selectedSearchLang,
                 palette = uiState.ambientPalette,
                 onQueryChange = { viewModel.updateSearchQuery(it) },
+                onSelectLanguage = { lang -> viewModel.selectSearchLanguage(lang) },
                 onSelectCandidate = { candidate -> viewModel.selectSearchCandidate(candidate) },
                 onDismiss = { viewModel.closeSearch() },
             )
@@ -273,12 +275,16 @@ fun CadenceAppRoot(
                 track = activeTrack,
                 telemetry = uiState.telemetry,
                 syncOffsetMs = uiState.syncOffsetMs,
+                isTrackSynced = uiState.isTrackSynced,
                 isMicSyncEnabled = uiState.isMicSyncEnabled,
                 engineNotice = uiState.recognitionEngineNote,
                 customAudDToken = uiState.customAudDToken,
                 palette = uiState.ambientPalette,
                 onAdjustOffset = { delta -> viewModel.adjustSyncOffset(delta) },
                 onResetOffset = { viewModel.resetSyncOffset() },
+                onForceResync = {
+                    requestMicAndRun { viewModel.relockCurrentLineWithMic(forceResync = true) }
+                },
                 onSaveAudDToken = { token -> viewModel.saveCustomAudDToken(token) },
                 onDismiss = { viewModel.closeCalibrationSheet() },
             )

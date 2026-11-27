@@ -42,6 +42,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -55,16 +56,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.R
@@ -78,9 +82,10 @@ import kotlinx.coroutines.launch
 import kotlin.math.abs
 
 /**
- * High-frame-rate Musixmatch-inspired word-by-word synced lyrics display with
- * smooth horizontal karaoke fill, synchronized dual-line translations, crisp
- * upcoming line legibility, active spotlight accent bar, and beat-synced interludes.
+ * High-frame-rate universal-script word-by-word synced lyrics display with
+ * smooth hardware-clipped karaoke fill (supporting Latin, CJK, Korean, Thai,
+ * Indic, Cyrillic, Greek, and RTL Arabic/Hebrew), synchronized dual-line
+ * translations, active spotlight accent bar, and beat-synced interludes.
  */
 @Composable
 fun WordSyncedLyricsView(
@@ -98,11 +103,13 @@ fun WordSyncedLyricsView(
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
-    var livePositionMs by remember { mutableLongStateOf(clockAnchor.currentPositionMs() + syncOffsetMs) }
+    var livePositionMs by remember {
+        mutableLongStateOf((clockAnchor.currentPositionMs() + syncOffsetMs).coerceAtLeast(0L))
+    }
 
     LaunchedEffect(clockAnchor, syncOffsetMs) {
+        livePositionMs = (clockAnchor.currentPositionMs() + syncOffsetMs).coerceAtLeast(0L)
         if (!clockAnchor.isRunning) {
-            livePositionMs = (clockAnchor.basePositionMs + syncOffsetMs).coerceAtLeast(0L)
             return@LaunchedEffect
         }
         while (true) {
@@ -259,6 +266,9 @@ private fun WordSyncedLineItem(
     highlightTint: Color,
     onTap: () -> Unit,
 ) {
+    val isRtl = remember(line.rawText) { isRtlText(line.rawText) }
+    val lineDirection = if (isRtl) LayoutDirection.Rtl else LayoutDirection.Ltr
+
     val lineScale by animateFloatAsState(
         targetValue = if (isActive) 1.0f else 0.94f,
         animationSpec = spring(dampingRatio = 0.78f, stiffness = 260f),
@@ -269,14 +279,13 @@ private fun WordSyncedLineItem(
             isActive -> 1.0f
             isPast && distanceFromActive == 1 -> 0.42f
             isPast -> 0.28f
-            distanceFromActive == 1 -> 0.62f // Crisp Musixmatch preview of upcoming line
+            distanceFromActive == 1 -> 0.64f
             distanceFromActive == 2 -> 0.42f
             else -> 0.28f
         },
         animationSpec = spring(dampingRatio = 0.85f, stiffness = 220f),
         label = "lineAlpha",
     )
-    // Keep immediate next/prev line razor-sharp so users can sing ahead effortlessly
     val blurRadiusDp = when {
         isActive || distanceFromActive <= 1 || Build.VERSION.SDK_INT < Build.VERSION_CODES.S -> 0.dp
         distanceFromActive == 2 -> 1.1.dp
@@ -285,101 +294,122 @@ private fun WordSyncedLineItem(
 
     val interactionSource = remember { MutableInteractionSource() }
     val blurModifier = if (blurRadiusDp > 0.dp) Modifier.blur(blurRadiusDp) else Modifier
-    val activeBg = if (isActive) Color.White.copy(alpha = 0.065f) else Color.Transparent
+    val activeBg = if (isActive) Color.White.copy(alpha = 0.07f) else Color.Transparent
 
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(IntrinsicSize.Min)
-            .clip(RoundedCornerShape(20.dp))
-            .background(activeBg)
-            .clickable(
-                interactionSource = interactionSource,
-                indication = ripple(color = Color.White.copy(alpha = 0.3f)),
-                onClick = onTap,
-            )
-            .padding(horizontal = 10.dp, vertical = 10.dp)
-            .graphicsLayer {
-                scaleX = lineScale
-                scaleY = lineScale
-                alpha = lineAlpha
-                transformOrigin = TransformOrigin(0f, 0.5f)
-            }
-            .then(blurModifier),
-    ) {
-        // Subtle Musixmatch-style luminous focus bar on the active lyric line
-        if (isActive) {
-            Box(
-                modifier = Modifier
-                    .width(4.dp)
-                    .fillMaxHeight()
-                    .padding(vertical = 4.dp)
-                    .clip(RoundedCornerShape(50))
-                    .background(highlightTint),
-            )
-            Spacer(modifier = Modifier.width(12.dp))
-        }
-
-        Column(modifier = Modifier.weight(1f)) {
-            if (!isActive || line.words.isEmpty()) {
-                Text(
-                    text = line.rawText,
-                    style = TextStyle(
-                        fontFamily = PlusJakartaSansFamily,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 28.sp,
-                        lineHeight = 36.sp,
-                        letterSpacing = (-0.4).sp,
-                    ),
-                    color = Color.White,
+    CompositionLocalProvider(LocalLayoutDirection provides lineDirection) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(IntrinsicSize.Min)
+                .clip(RoundedCornerShape(20.dp))
+                .background(activeBg)
+                .clickable(
+                    interactionSource = interactionSource,
+                    indication = ripple(color = Color.White.copy(alpha = 0.3f)),
+                    onClick = onTap,
                 )
-            } else {
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                    modifier = Modifier.fillMaxWidth(),
+                .padding(horizontal = 10.dp, vertical = 10.dp)
+                .graphicsLayer {
+                    scaleX = lineScale
+                    scaleY = lineScale
+                    alpha = lineAlpha
+                    transformOrigin = TransformOrigin(if (isRtl) 1f else 0f, 0.5f)
+                }
+                .then(blurModifier),
+        ) {
+            if (isActive) {
+                Box(
+                    modifier = Modifier
+                        .width(4.dp)
+                        .fillMaxHeight()
+                        .padding(vertical = 4.dp)
+                        .clip(RoundedCornerShape(50))
+                        .background(highlightTint),
+                )
+                Spacer(modifier = Modifier.width(12.dp))
+            }
+
+            Column(modifier = Modifier.weight(1f)) {
+                if (!isActive || line.words.isEmpty()) {
+                    Text(
+                        text = line.rawText,
+                        style = TextStyle(
+                            fontFamily = PlusJakartaSansFamily,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 27.sp,
+                            lineHeight = 36.sp,
+                            letterSpacing = (-0.2).sp,
+                        ),
+                        color = Color.White,
+                    )
+                } else {
+                    // Arrangement.Start + per-token trailing space preserves exact spacing for
+                    // both space-delimited scripts (Latin, Korean, Arabic, Hindi, Russian) and
+                    // unspaced scripts (Japanese, Chinese, Thai).
+                    FlowRow(
+                        horizontalArrangement = Arrangement.Start,
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        line.words.forEach { word ->
+                            WordKaraokeFillToken(
+                                word = word,
+                                currentMs = currentMs,
+                                highlightTint = highlightTint,
+                                isRtl = isRtl,
+                                modifier = Modifier.padding(
+                                    end = if (word.hasTrailingSpace) 8.dp else 0.dp,
+                                ),
+                            )
+                        }
+                    }
+                }
+
+                // Synchronized translation directly underneath each original line
+                AnimatedVisibility(
+                    visible = !translatedText.isNullOrBlank(),
+                    enter = fadeIn() + expandVertically(),
+                    exit = fadeOut() + shrinkVertically(),
                 ) {
-                    line.words.forEach { word ->
-                        WordKaraokeFillToken(
-                            word = word,
-                            currentMs = currentMs,
-                            highlightTint = highlightTint,
+                    val transIsRtl = remember(translatedText) { isRtlText(translatedText.orEmpty()) }
+                    CompositionLocalProvider(
+                        LocalLayoutDirection provides if (transIsRtl) LayoutDirection.Rtl else LayoutDirection.Ltr,
+                    ) {
+                        Text(
+                            text = translatedText.orEmpty(),
+                            style = TextStyle(
+                                fontFamily = InterFontFamily,
+                                fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Medium,
+                                fontSize = if (isActive) 17.sp else 15.sp,
+                                lineHeight = if (isActive) 23.sp else 20.sp,
+                            ),
+                            color = if (isActive) {
+                                highlightTint.copy(alpha = 0.96f)
+                            } else {
+                                Color.White.copy(alpha = 0.72f)
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 6.dp),
                         )
                     }
                 }
-            }
-
-            // Synchronized Musixmatch-style translation directly underneath each original line
-            AnimatedVisibility(
-                visible = !translatedText.isNullOrBlank(),
-                enter = fadeIn() + expandVertically(),
-                exit = fadeOut() + shrinkVertically(),
-            ) {
-                Text(
-                    text = translatedText.orEmpty(),
-                    style = TextStyle(
-                        fontFamily = InterFontFamily,
-                        fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Medium,
-                        fontSize = if (isActive) 17.sp else 15.sp,
-                        lineHeight = if (isActive) 23.sp else 20.sp,
-                    ),
-                    color = if (isActive) {
-                        highlightTint.copy(alpha = 0.96f)
-                    } else {
-                        Color.White.copy(alpha = 0.72f)
-                    },
-                    modifier = Modifier.padding(top = 6.dp),
-                )
             }
         }
     }
 }
 
+/**
+ * Hardware-clipped two-layer karaoke token that renders smooth, exact left-to-right (or
+ * right-to-left for Arabic/Hebrew) word fill across every Unicode script and system fallback font.
+ */
 @Composable
 private fun WordKaraokeFillToken(
     word: WordTiming,
     currentMs: Long,
     highlightTint: Color,
+    isRtl: Boolean,
+    modifier: Modifier = Modifier,
 ) {
     val rawProgress = when {
         currentMs <= word.startMs -> 0f
@@ -387,48 +417,37 @@ private fun WordKaraokeFillToken(
         else -> (currentMs - word.startMs).toFloat() / word.durationMs.toFloat()
     }.coerceIn(0f, 1f)
 
+    // Smooth ease-out-in progression for natural vocal phrasing
     val fillProgress = if (rawProgress in 0.001f..0.999f) {
-        1f - ((1f - rawProgress) * (1f - rawProgress) * 0.35f + (1f - rawProgress) * 0.65f)
+        1f - ((1f - rawProgress) * (1f - rawProgress) * 0.25f + (1f - rawProgress) * 0.75f)
     } else {
         rawProgress
     }
 
-    val isCurrentlySpoken = rawProgress in 0.01f..0.98f
+    val isCurrentlySpoken = rawProgress in 0.01f..0.99f
     val floatLiftDp = when {
-        isCurrentlySpoken -> -2.4f * kotlin.math.sin(rawProgress * Math.PI).toFloat()
-        rawProgress >= 0.98f -> -0.5f
+        isCurrentlySpoken -> -2.2f * kotlin.math.sin(rawProgress * Math.PI).toFloat()
+        rawProgress >= 0.99f -> -0.4f
         else -> 0f
     }
 
-    val wordBrush = when {
-        fillProgress <= 0.005f -> Brush.horizontalGradient(
-            listOf(Color.White.copy(alpha = 0.42f), Color.White.copy(alpha = 0.42f)),
-        )
-        fillProgress >= 0.995f -> Brush.horizontalGradient(
-            listOf(Color.White, Color.White),
-        )
-        else -> {
-            val lead = fillProgress.coerceIn(0.02f, 0.96f)
-            val softEdge = (lead + 0.14f).coerceAtMost(1f)
-            Brush.horizontalGradient(
-                0f to Color.White,
-                lead to Color.White,
-                ((lead + softEdge) * 0.5f) to highlightTint.copy(alpha = 0.94f),
-                softEdge to Color.White.copy(alpha = 0.42f),
-                1f to Color.White.copy(alpha = 0.42f),
-            )
-        }
-    }
+    val baseStyle = TextStyle(
+        fontFamily = PlusJakartaSansFamily,
+        fontWeight = FontWeight.ExtraBold,
+        fontSize = 28.sp,
+        lineHeight = 37.sp,
+        letterSpacing = (-0.2).sp,
+    )
 
-    val glowShadow = if (isCurrentlySpoken) {
+    val activeShadow = if (isCurrentlySpoken) {
         Shadow(
-            color = highlightTint.copy(alpha = 0.65f),
+            color = highlightTint.copy(alpha = 0.85f),
             offset = Offset(0f, 0f),
-            blurRadius = 16f,
+            blurRadius = 18f,
         )
-    } else if (fillProgress >= 0.995f) {
+    } else if (fillProgress >= 0.99f) {
         Shadow(
-            color = Color.White.copy(alpha = 0.25f),
+            color = Color.White.copy(alpha = 0.28f),
             offset = Offset(0f, 0f),
             blurRadius = 8f,
         )
@@ -436,21 +455,52 @@ private fun WordKaraokeFillToken(
         null
     }
 
-    Text(
-        text = word.text,
-        style = TextStyle(
-            fontFamily = PlusJakartaSansFamily,
-            fontWeight = FontWeight.ExtraBold,
-            fontSize = 29.sp,
-            lineHeight = 37.sp,
-            letterSpacing = (-0.4).sp,
-            brush = wordBrush,
-            shadow = glowShadow,
-        ),
-        modifier = Modifier.graphicsLayer {
+    Box(
+        modifier = modifier.graphicsLayer {
             translationY = floatLiftDp.dp.toPx()
         },
-    )
+    ) {
+        // Base layer: crisp dim unsung word
+        Text(
+            text = word.text,
+            style = baseStyle,
+            color = Color.White.copy(alpha = 0.34f),
+        )
+
+        // Overlay layer: pure bright sung fill swept smoothly with sub-pixel clipRect
+        if (fillProgress > 0.002f) {
+            Text(
+                text = word.text,
+                style = baseStyle.copy(shadow = activeShadow),
+                color = if (isCurrentlySpoken) Color.White else Color.White.copy(alpha = 0.96f),
+                modifier = Modifier.drawWithContent {
+                    if (fillProgress >= 0.998f) {
+                        drawContent()
+                    } else if (isRtl) {
+                        val clipLeft = size.width * (1f - fillProgress)
+                        clipRect(
+                            left = clipLeft,
+                            top = -12f,
+                            right = size.width + 12f,
+                            bottom = size.height + 12f,
+                        ) {
+                            this@drawWithContent.drawContent()
+                        }
+                    } else {
+                        val clipRight = size.width * fillProgress
+                        clipRect(
+                            left = -12f,
+                            top = -12f,
+                            right = clipRight,
+                            bottom = size.height + 12f,
+                        ) {
+                            this@drawWithContent.drawContent()
+                        }
+                    }
+                },
+            )
+        }
+    }
 }
 
 @Composable
@@ -520,4 +570,19 @@ private fun findActiveLineIndex(lines: List<LyricLine>, currentMs: Long): Int {
         }
     }
     return active
+}
+
+private fun isRtlText(text: String): Boolean {
+    for (ch in text) {
+        val dir = Character.getDirectionality(ch)
+        if (dir == Character.DIRECTIONALITY_RIGHT_TO_LEFT ||
+            dir == Character.DIRECTIONALITY_RIGHT_TO_LEFT_ARABIC
+        ) {
+            return true
+        }
+        if (dir == Character.DIRECTIONALITY_LEFT_TO_RIGHT) {
+            return false
+        }
+    }
+    return false
 }

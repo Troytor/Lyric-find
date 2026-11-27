@@ -14,9 +14,10 @@ data class ParsedLrcDocument(
 )
 
 object LrcParser {
-    private val lineTagPattern = Regex("""\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?]""")
+    // Supports both ASCII [mm:ss.xx] and full-width CJK ［mm:ss.xx］ brackets
+    private val lineTagPattern = Regex("""[\[［](\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?[\]］]""")
     private val wordTagPattern = Regex("""<(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?>""")
-    private val offsetPattern = Regex("""\[offset:\s*(-?\d+)]""", RegexOption.IGNORE_CASE)
+    private val offsetPattern = Regex("""[\[［]offset:\s*(-?\d+)[\]］]""", RegexOption.IGNORE_CASE)
 
     fun parse(rawLrc: String): ParsedLrcDocument {
         val offsetMs = offsetPattern.find(rawLrc)?.groupValues?.getOrNull(1)?.toLongOrNull() ?: 0L
@@ -30,22 +31,49 @@ object LrcParser {
             val matches = lineTagPattern.findAll(trimmed).toList()
             if (matches.isEmpty()) return@forEach
 
-            val bodyStart = matches.last().range.last + 1
-            val rawBody = trimmed.substring(bodyStart).trim()
+            // Check if timestamps appear inline between lyrics (e.g. [00:10.00]word1 [00:10.50]word2)
+            val leadingMatches = mutableListOf<MatchResult>()
+            var cursor = 0
+            for (m in matches) {
+                val between = trimmed.substring(cursor, m.range.first)
+                if (between.isBlank()) {
+                    leadingMatches += m
+                    cursor = m.range.last + 1
+                } else {
+                    break
+                }
+            }
 
-            matches.forEach { tag ->
+            if (leadingMatches.isEmpty()) return@forEach
+
+            // If there are additional bracket tags AFTER lyrics start, treat them as inline word tags
+            val inlineBracketMatches = matches.drop(leadingMatches.size)
+            val rawBody = trimmed.substring(cursor).trim()
+
+            leadingMatches.forEach { tag ->
                 val timestamp = (parseTimestampMs(
                     minutes = tag.groupValues[1],
                     seconds = tag.groupValues[2],
                     fraction = tag.groupValues[3],
                 ) + offsetMs).coerceAtLeast(0L)
 
-                val wordMatches = wordTagPattern.findAll(rawBody).toList()
+                val angleWordMatches = wordTagPattern.findAll(rawBody).toList()
+                val wordMatches = when {
+                    angleWordMatches.isNotEmpty() -> angleWordMatches
+                    inlineBracketMatches.isNotEmpty() -> lineTagPattern.findAll(rawBody).toList()
+                    else -> emptyList()
+                }
+
                 if (wordMatches.isNotEmpty()) {
-                    foundEnhanced = true
-                    val extractedWords = extractEnhancedWords(rawBody, wordMatches, timestamp, offsetMs)
-                    val cleanText = rawBody.replace(wordTagPattern, " ").replace(Regex("\\s+"), " ").trim()
+                    val extractedWords = extractEnhancedWords(
+                        body = rawBody,
+                        matches = wordMatches,
+                        lineStartMs = timestamp,
+                        offsetMs = offsetMs,
+                    )
+                    val cleanText = buildCleanTextFromWords(extractedWords, rawBody)
                     if (cleanText.isNotEmpty()) {
+                        if (extractedWords.isNotEmpty()) foundEnhanced = true
                         entries += RawTimedLine(
                             startMs = timestamp,
                             text = cleanText,
@@ -72,7 +100,26 @@ object LrcParser {
         lineStartMs: Long,
         offsetMs: Long,
     ): List<WordTiming> {
-        val rawPieces = mutableListOf<Pair<Long, String>>()
+        data class RawPiece(
+            val startMs: Long,
+            val text: String,
+            val hasTrailingSpace: Boolean,
+        )
+
+        val pieces = mutableListOf<RawPiece>()
+        var explicitClosingEndMs: Long? = null
+
+        // Preserve any lyric text appearing BEFORE the first inline word tag
+        val prefixRaw = body.substring(0, matches.first().range.first)
+        val prefixTrimmed = prefixRaw.trim()
+        if (prefixTrimmed.isNotEmpty()) {
+            pieces += RawPiece(
+                startMs = lineStartMs,
+                text = prefixTrimmed,
+                hasTrailingSpace = prefixRaw.last().isWhitespace(),
+            )
+        }
+
         for (idx in matches.indices) {
             val current = matches[idx]
             val start = (parseTimestampMs(
@@ -83,26 +130,54 @@ object LrcParser {
 
             val textStart = current.range.last + 1
             val textEnd = if (idx + 1 < matches.size) matches[idx + 1].range.first else body.length
-            val token = body.substring(textStart, textEnd).trim()
+            val rawSegment = body.substring(textStart, textEnd)
+            val token = rawSegment.trim()
+
             if (token.isNotEmpty()) {
-                rawPieces += start to token
+                val trailingSpace = rawSegment.isNotEmpty() && rawSegment.last().isWhitespace()
+                pieces += RawPiece(
+                    startMs = start,
+                    text = token,
+                    hasTrailingSpace = trailingSpace,
+                )
+            } else if (idx == matches.lastIndex && pieces.isNotEmpty()) {
+                // Trailing end-of-line timestamp tag like <00:15.40>
+                explicitClosingEndMs = start
             }
         }
 
-        return rawPieces.mapIndexed { idx, (startMs, token) ->
-            val endMs = if (idx + 1 < rawPieces.size) {
-                rawPieces[idx + 1].first.coerceAtLeast(startMs + 80L)
-            } else {
-                startMs + 420L
+        return pieces.mapIndexed { idx, piece ->
+            val endMs = when {
+                idx + 1 < pieces.size -> pieces[idx + 1].startMs.coerceAtLeast(piece.startMs + 60L)
+                explicitClosingEndMs != null -> explicitClosingEndMs.coerceAtLeast(piece.startMs + 80L)
+                else -> piece.startMs + 420L
             }
             WordTiming(
-                text = token,
-                startMs = startMs,
+                text = piece.text,
+                startMs = piece.startMs,
                 endMs = endMs,
                 stressWeight = 1f,
                 isBeatAligned = true,
+                hasTrailingSpace = if (idx == pieces.lastIndex) false else piece.hasTrailingSpace,
             )
         }
+    }
+
+    private fun buildCleanTextFromWords(words: List<WordTiming>, fallbackRaw: String): String {
+        if (words.isEmpty()) {
+            return fallbackRaw.replace(wordTagPattern, "")
+                .replace(lineTagPattern, "")
+                .replace(Regex("\\s+"), " ")
+                .trim()
+        }
+        val sb = StringBuilder()
+        words.forEachIndexed { idx, word ->
+            sb.append(word.text)
+            if (idx < words.lastIndex && word.hasTrailingSpace) {
+                sb.append(' ')
+            }
+        }
+        return sb.toString().trim()
     }
 
     private fun parseTimestampMs(minutes: String, seconds: String, fraction: String): Long {

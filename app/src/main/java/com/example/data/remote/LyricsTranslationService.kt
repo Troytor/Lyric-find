@@ -92,6 +92,20 @@ class LyricsTranslationService {
         }
     }
 
+    /**
+     * Translates a short song search query into the target script/language for cross-script
+     * discovery (e.g., typing an English title while searching the Japanese or Korean catalog).
+     */
+    suspend fun translateQueryText(
+        query: String,
+        targetLangCode: String,
+    ): String? = withContext(Dispatchers.IO) {
+        val trimmed = query.trim()
+        if (trimmed.isBlank()) return@withContext null
+        val translated = translateChunkViaPublicEndpoint(trimmed, targetLangCode)?.first?.trim()
+        translated?.takeIf { it.isNotBlank() && !it.equals(trimmed, ignoreCase = true) }
+    }
+
     private fun translateChunkViaPublicEndpoint(
         text: String,
         targetLangCode: String,

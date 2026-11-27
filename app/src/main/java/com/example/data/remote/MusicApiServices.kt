@@ -191,6 +191,8 @@ interface ItunesSearchApi {
         @Query("media") media: String = "music",
         @Query("entity") entity: String = "song",
         @Query("limit") limit: Int = 10,
+        @Query("country") country: String? = null,
+        @Query("lang") lang: String? = null,
     ): ItunesSearchResponse
 }
 

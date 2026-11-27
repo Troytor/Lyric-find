@@ -10,6 +10,7 @@ data class WordTiming(
     val endMs: Long,
     val stressWeight: Float = 1f,
     val isBeatAligned: Boolean = false,
+    val hasTrailingSpace: Boolean = true,
 ) {
     val durationMs: Long get() = (endMs - startMs).coerceAtLeast(1L)
 }
@@ -140,5 +141,43 @@ object SupportedTranslationLanguages {
     )
 
     fun byCode(code: String?): TranslationLanguage =
+        all.firstOrNull { it.code.equals(code, ignoreCase = true) } ?: all.first()
+}
+
+@Immutable
+data class SearchLanguageOption(
+    val code: String,
+    val displayName: String,
+    val nativeName: String,
+    val itunesCountry: String? = null,
+    val itunesLang: String? = null,
+    val requiresNonLatinScript: Boolean = false,
+) {
+    val isUniversal: Boolean get() = code == "all"
+}
+
+object SupportedSearchLanguages {
+    val all: List<SearchLanguageOption> = listOf(
+        SearchLanguageOption("all", "All Languages", "Universal"),
+        SearchLanguageOption("en", "English", "English", itunesCountry = "US", itunesLang = "en_us"),
+        SearchLanguageOption("es", "Spanish", "Español", itunesCountry = "MX", itunesLang = "en_us"),
+        SearchLanguageOption("ja", "Japanese", "日本語", itunesCountry = "JP", itunesLang = "ja_jp", requiresNonLatinScript = true),
+        SearchLanguageOption("ko", "Korean", "한국어", itunesCountry = "KR", itunesLang = "en_us", requiresNonLatinScript = true),
+        SearchLanguageOption("zh-CN", "Chinese", "中文", itunesCountry = "TW", itunesLang = "en_us", requiresNonLatinScript = true),
+        SearchLanguageOption("fr", "French", "Français", itunesCountry = "FR", itunesLang = "en_us"),
+        SearchLanguageOption("pt", "Portuguese", "Português", itunesCountry = "BR", itunesLang = "en_us"),
+        SearchLanguageOption("de", "German", "Deutsch", itunesCountry = "DE", itunesLang = "en_us"),
+        SearchLanguageOption("it", "Italian", "Italiano", itunesCountry = "IT", itunesLang = "en_us"),
+        SearchLanguageOption("hi", "Hindi", "हिन्दी", itunesCountry = "IN", itunesLang = "en_us", requiresNonLatinScript = true),
+        SearchLanguageOption("ar", "Arabic", "العربية", itunesCountry = "AE", itunesLang = "en_us", requiresNonLatinScript = true),
+        SearchLanguageOption("ru", "Russian", "Русский", itunesCountry = "RU", itunesLang = "en_us", requiresNonLatinScript = true),
+        SearchLanguageOption("tr", "Turkish", "Türkçe", itunesCountry = "TR", itunesLang = "en_us"),
+        SearchLanguageOption("vi", "Vietnamese", "Tiếng Việt", itunesCountry = "VN", itunesLang = "en_us"),
+        SearchLanguageOption("th", "Thai", "ไทย", itunesCountry = "TH", itunesLang = "en_us", requiresNonLatinScript = true),
+        SearchLanguageOption("id", "Indonesian", "Bahasa Indonesia", itunesCountry = "ID", itunesLang = "en_us"),
+        SearchLanguageOption("tl", "Tagalog", "Tagalog", itunesCountry = "PH", itunesLang = "en_us"),
+    )
+
+    fun byCode(code: String?): SearchLanguageOption =
         all.firstOrNull { it.code.equals(code, ignoreCase = true) } ?: all.first()
 }

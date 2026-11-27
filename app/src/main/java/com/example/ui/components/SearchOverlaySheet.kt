@@ -9,9 +9,11 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -25,16 +27,25 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.KeyboardArrowUp
+import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -45,11 +56,16 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.example.R
+import com.example.model.SearchLanguageOption
 import com.example.model.SongCandidate
+import com.example.model.SupportedSearchLanguages
 import com.example.ui.theme.AmbientPalette
 
 @Composable
@@ -57,14 +73,21 @@ fun SearchOverlaySheet(
     query: String,
     results: List<SongCandidate>,
     isSearching: Boolean,
+    selectedLanguage: SearchLanguageOption,
     palette: AmbientPalette,
     onQueryChange: (String) -> Unit,
+    onSelectLanguage: (SearchLanguageOption) -> Unit,
     onSelectCandidate: (SongCandidate) -> Unit,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     BackHandler(onBack = onDismiss)
     val focusRequester = remember { FocusRequester() }
+    var isLanguageMenuExpanded by remember { mutableStateOf(false) }
+
+    val trimmedQuery = query.trim()
+    val hasValidQuery = trimmedQuery.length >= 2 || trimmedQuery.any { it.code > 127 }
+    val languageDropdownCd = stringResource(R.string.search_language_dropdown_cd)
 
     LaunchedEffect(Unit) {
         runCatching { focusRequester.requestFocus() }
@@ -150,7 +173,7 @@ fun SearchOverlaySheet(
                         if (query.isNotEmpty()) {
                             Icon(
                                 imageVector = Icons.Rounded.Close,
-                                contentDescription = "Clear search",
+                                contentDescription = stringResource(R.string.search_clear_cd),
                                 tint = Color.White.copy(alpha = 0.72f),
                                 modifier = Modifier
                                     .size(24.dp)
@@ -163,7 +186,159 @@ fun SearchOverlaySheet(
                 }
             }
 
-            Spacer(modifier = Modifier.height(18.dp))
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Universal Language Filter Dropdown Row
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    text = stringResource(R.string.search_language_label),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = Color.White.copy(alpha = 0.62f),
+                )
+
+                Box(modifier = Modifier.weight(1f)) {
+                    val selectedLabel = when {
+                        selectedLanguage.isUniversal ->
+                            "${selectedLanguage.displayName} (${selectedLanguage.nativeName})"
+                        selectedLanguage.nativeName.equals(selectedLanguage.displayName, ignoreCase = true) ->
+                            selectedLanguage.displayName
+                        else ->
+                            "${selectedLanguage.nativeName} · ${selectedLanguage.displayName}"
+                    }
+
+                    LiquidGlassSurface(
+                        shape = RoundedCornerShape(16.dp),
+                        tintColor = if (selectedLanguage.isUniversal) Color(0xFF0E172B) else palette.highlightTint,
+                        fillAlpha = if (selectedLanguage.isUniversal) 0.44f else 0.18f,
+                        highlightAlpha = if (selectedLanguage.isUniversal) 0.22f else 0.36f,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .defaultMinSize(minHeight = 48.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .clickable { isLanguageMenuExpanded = true }
+                            .semantics { contentDescription = "$languageDropdownCd: $selectedLabel" }
+                            .testTag("search_language_dropdown_button"),
+                        contentAlignment = Alignment.CenterStart,
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 10.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Language,
+                                contentDescription = null,
+                                tint = if (selectedLanguage.isUniversal) {
+                                    Color.White.copy(alpha = 0.80f)
+                                } else {
+                                    palette.highlightTint
+                                },
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = selectedLabel,
+                                style = MaterialTheme.typography.bodyMedium.copy(
+                                    fontWeight = FontWeight.Medium,
+                                ),
+                                color = Color.White,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Icon(
+                                imageVector = if (isLanguageMenuExpanded) {
+                                    Icons.Rounded.KeyboardArrowUp
+                                } else {
+                                    Icons.Rounded.KeyboardArrowDown
+                                },
+                                contentDescription = null,
+                                tint = Color.White.copy(alpha = 0.78f),
+                                modifier = Modifier.size(20.dp),
+                            )
+                        }
+                    }
+
+                    DropdownMenu(
+                        expanded = isLanguageMenuExpanded,
+                        onDismissRequest = { isLanguageMenuExpanded = false },
+                        containerColor = Color(0xF50E172B),
+                        shape = RoundedCornerShape(20.dp),
+                        modifier = Modifier
+                            .widthIn(min = 240.dp, max = 320.dp)
+                            .heightIn(max = 380.dp)
+                            .testTag("search_language_dropdown_menu"),
+                    ) {
+                        SupportedSearchLanguages.all.forEach { option ->
+                            val isSelected = option.code.equals(selectedLanguage.code, ignoreCase = true)
+                            DropdownMenuItem(
+                                text = {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.fillMaxWidth(),
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = if (option.isUniversal) {
+                                                    option.displayName
+                                                } else {
+                                                    option.nativeName
+                                                },
+                                                style = MaterialTheme.typography.bodyMedium.copy(
+                                                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                                                ),
+                                                color = if (isSelected) palette.highlightTint else Color.White,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                            val subtitle = when {
+                                                option.isUniversal -> option.nativeName
+                                                option.nativeName.equals(option.displayName, ignoreCase = true) -> null
+                                                else -> option.displayName
+                                            }
+                                            if (subtitle != null) {
+                                                Text(
+                                                    text = subtitle,
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = Color.White.copy(alpha = 0.56f),
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                )
+                                            }
+                                        }
+                                        if (isSelected) {
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Icon(
+                                                imageVector = Icons.Rounded.Check,
+                                                contentDescription = null,
+                                                tint = palette.highlightTint,
+                                                modifier = Modifier.size(18.dp),
+                                            )
+                                        }
+                                    }
+                                },
+                                onClick = {
+                                    isLanguageMenuExpanded = false
+                                    onSelectLanguage(option)
+                                },
+                                modifier = Modifier
+                                    .background(
+                                        if (isSelected) palette.highlightTint.copy(alpha = 0.14f) else Color.Transparent,
+                                    )
+                                    .testTag("search_language_item_${option.code}"),
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
 
             when {
                 isSearching -> {
@@ -181,7 +356,7 @@ fun SearchOverlaySheet(
                     }
                 }
 
-                query.trim().length < 2 -> {
+                !hasValidQuery -> {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()

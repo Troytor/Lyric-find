@@ -52,12 +52,14 @@ fun SyncEngineBottomSheet(
     track: SyncedTrack,
     telemetry: AudioTelemetry,
     syncOffsetMs: Long,
+    isTrackSynced: Boolean,
     isMicSyncEnabled: Boolean,
     engineNotice: String,
     customAudDToken: String,
     palette: AmbientPalette,
     onAdjustOffset: (Long) -> Unit,
     onResetOffset: () -> Unit,
+    onForceResync: () -> Unit,
     onSaveAudDToken: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -198,17 +200,32 @@ fun SyncEngineBottomSheet(
                     accent = Color.White,
                     modifier = Modifier.weight(1f),
                 )
-                val driftText = if (isMicSyncEnabled && telemetry.driftConfidence >= 0.35f) {
-                    val sign = if (telemetry.estimatedDriftMs >= 0) "+" else ""
-                    "${sign}${telemetry.estimatedDriftMs}ms"
-                } else {
-                    "Locked"
-                }
                 MetricGlassTile(
                     label = stringResource(R.string.engine_acoustic_drift),
-                    value = if (isMicSyncEnabled) driftText else "—",
+                    value = if (isTrackSynced) "Synced" else "Ready",
                     accent = palette.highlightTint,
                     modifier = Modifier.weight(1f),
+                )
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            LiquidGlassPillButton(
+                onClick = {
+                    onDismiss()
+                    onForceResync()
+                },
+                isActive = !isTrackSynced,
+                accentColor = palette.highlightTint,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+                    .testTag("engine_force_resync_button"),
+            ) {
+                Text(
+                    text = stringResource(R.string.engine_force_resync),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = Color.White,
                 )
             }
 

@@ -6,7 +6,9 @@ import com.example.engine.ShazamSignatureGenerator
 import com.example.engine.WordPacingMlEngine
 import com.example.model.DevicePlayingTrack
 import com.example.model.LyricLine
+import com.example.model.SearchLanguageOption
 import com.example.model.SongCandidate
+import com.example.model.SupportedSearchLanguages
 import com.example.model.SyncedTrack
 import com.example.model.TimingSource
 import com.example.model.TrackMetadata
@@ -334,11 +336,19 @@ class MusicRepository(
     }
 
     /**
-     * Live internet search combining LRCLIB synced lyrics, iTunes artwork, and Genius full-text lyric matches.
+     * Universal multi-language internet song search combining LRCLIB synced lyrics,
+     * regional iTunes storefronts, Deezer's international catalog, Genius lyric hits,
+     * and automatic cross-script query expansion when a specific language is selected.
      */
-    suspend fun searchRealTracks(query: String): List<SongCandidate> = coroutineScope {
+    suspend fun searchRealTracks(
+        query: String,
+        language: SearchLanguageOption = SupportedSearchLanguages.all.first(),
+    ): List<SongCandidate> = coroutineScope {
         val cleanQuery = query.trim()
-        if (cleanQuery.length < 2) return@coroutineScope emptyList()
+        val hasNonAscii = cleanQuery.any { it.code > 127 }
+        if (cleanQuery.isEmpty() || (!hasNonAscii && cleanQuery.length < 2)) {
+            return@coroutineScope emptyList()
+        }
 
         val lrcDeferred = async {
             runCatching { lrcLibApi.searchByQuery(cleanQuery) }
@@ -346,14 +356,58 @@ class MusicRepository(
                 .getOrDefault(emptyList())
         }
         val itunesDeferred = async {
-            runCatching { itunesApi.searchTracks(term = cleanQuery, limit = 12).results }
-                .onFailure { if (it is CancellationException) throw it else Log.w(TAG, "iTunes search failed", it) }
+            runCatching {
+                itunesApi.searchTracks(
+                    term = cleanQuery,
+                    limit = 15,
+                    country = language.itunesCountry,
+                    lang = language.itunesLang,
+                ).results
+            }.onFailure { if (it is CancellationException) throw it else Log.w(TAG, "iTunes search failed", it) }
+                .getOrDefault(emptyList())
+        }
+        val deezerDeferred = async {
+            runCatching { deezerApi.searchTracks(query = cleanQuery, limit = 10).data }
+                .onFailure { if (it is CancellationException) throw it else Log.w(TAG, "Deezer search failed", it) }
                 .getOrDefault(emptyList())
         }
         val geniusDeferred = async { fetchGeniusLeads(cleanQuery) }
 
-        val lrcRecords = lrcDeferred.await()
-        val itunesTracks = itunesDeferred.await()
+        // If user chose a non-Latin language (e.g. Japanese/Korean/Arabic/Hindi) and typed Latin text,
+        // also search the native-script equivalent in parallel for true universal discovery.
+        val crossScriptDeferred = async {
+            if (!language.isUniversal && language.requiresNonLatinScript && isPredominantlyLatin(cleanQuery)) {
+                val nativeQuery = translationService.translateQueryText(cleanQuery, language.code)
+                if (!nativeQuery.isNullOrBlank()) {
+                    val nativeLrc = async {
+                        runCatching { lrcLibApi.searchByQuery(nativeQuery) }
+                            .onFailure { if (it is CancellationException) throw it }
+                            .getOrDefault(emptyList())
+                    }
+                    val nativeItunes = async {
+                        runCatching {
+                            itunesApi.searchTracks(
+                                term = nativeQuery,
+                                limit = 10,
+                                country = language.itunesCountry,
+                                lang = language.itunesLang,
+                            ).results
+                        }.onFailure { if (it is CancellationException) throw it }
+                            .getOrDefault(emptyList())
+                    }
+                    nativeLrc.await() to nativeItunes.await()
+                } else {
+                    emptyList<LrcLibRecord>() to emptyList<ItunesTrackDto>()
+                }
+            } else {
+                emptyList<LrcLibRecord>() to emptyList<ItunesTrackDto>()
+            }
+        }
+
+        val (nativeLrcRecords, nativeItunesTracks) = crossScriptDeferred.await()
+        val lrcRecords = lrcDeferred.await() + nativeLrcRecords
+        val itunesTracks = (nativeItunesTracks + itunesDeferred.await())
+        val deezerTracks = deezerDeferred.await()
         val geniusLeads = geniusDeferred.await()
 
         val candidates = mutableListOf<SongCandidate>()
@@ -361,13 +415,21 @@ class MusicRepository(
 
         val sortedLrc = lrcRecords
             .filter { !it.trackName.isNullOrBlank() && !it.artistName.isNullOrBlank() }
-            .sortedByDescending { !it.syncedLyrics.isNullOrBlank() }
+            .sortedWith(
+                compareByDescending<LrcLibRecord> {
+                    if (language.requiresNonLatinScript) {
+                        matchesPreferredScript("${it.trackName} ${it.artistName}", language.code)
+                    } else {
+                        false
+                    }
+                }.thenByDescending { !it.syncedLyrics.isNullOrBlank() },
+            )
 
         for (record in sortedLrc) {
             val title = record.trackName.orEmpty().trim()
             val artist = record.artistName.orEmpty().trim()
             val dedupKey = "${normalizeText(title)}|${normalizeText(artist)}"
-            if (!seenKeys.add(dedupKey)) continue
+            if (dedupKey == "|" || !seenKeys.add(dedupKey)) continue
 
             val matchedItunes = findMatchingItunesTrack(title, artist, itunesTracks)
             val artwork = matchedItunes?.artworkUrl100?.toHighResArtwork()
@@ -392,9 +454,70 @@ class MusicRepository(
             if (candidates.size >= 14) break
         }
 
+        // Regional iTunes storefront results (crucial for native-script Japanese, Korean, Hindi, Arabic, Latin catalogs)
+        val sortedItunes = itunesTracks.sortedByDescending { track ->
+            if (language.requiresNonLatinScript) {
+                matchesPreferredScript("${track.trackName} ${track.artistName}", language.code)
+            } else {
+                false
+            }
+        }
+        for (track in sortedItunes) {
+            val title = track.trackName.orEmpty().trim()
+            val artist = track.artistName.orEmpty().trim()
+            if (title.isBlank() || artist.isBlank()) continue
+            val dedupKey = "${normalizeText(title)}|${normalizeText(artist)}"
+            if (dedupKey == "|" || !seenKeys.add(dedupKey)) continue
+
+            candidates += SongCandidate(
+                metadata = TrackMetadata(
+                    id = "itunes_${track.trackId}",
+                    title = title,
+                    artist = artist,
+                    album = track.collectionName.orEmpty(),
+                    durationMs = track.trackTimeMillis ?: 0L,
+                    artworkUrl = track.artworkUrl100?.toHighResArtwork(),
+                    previewUrl = track.previewUrl,
+                    sourceLabel = if (language.itunesCountry != null) {
+                        "iTunes (${language.itunesCountry})"
+                    } else {
+                        "iTunes"
+                    },
+                ),
+                syncedLyricsRaw = null,
+                plainLyricsRaw = null,
+            )
+            if (candidates.size >= 20) break
+        }
+
+        // Deezer international catalog hits
+        for (track in deezerTracks) {
+            val title = track.title.orEmpty().trim()
+            val artist = track.artist?.name.orEmpty().trim()
+            if (title.isBlank() || artist.isBlank()) continue
+            val dedupKey = "${normalizeText(title)}|${normalizeText(artist)}"
+            if (dedupKey == "|" || !seenKeys.add(dedupKey)) continue
+
+            candidates += SongCandidate(
+                metadata = TrackMetadata(
+                    id = "deezer_${track.id}",
+                    title = title,
+                    artist = artist,
+                    album = track.album?.title.orEmpty(),
+                    durationMs = (track.duration ?: 0) * 1_000L,
+                    artworkUrl = track.album?.coverBig ?: track.album?.coverXl,
+                    previewUrl = track.preview,
+                    sourceLabel = "Deezer",
+                ),
+                syncedLyricsRaw = null,
+                plainLyricsRaw = null,
+            )
+            if (candidates.size >= 24) break
+        }
+
         for (lead in geniusLeads) {
             val dedupKey = "${normalizeText(lead.title)}|${normalizeText(lead.artist)}"
-            if (!seenKeys.add(dedupKey)) continue
+            if (dedupKey == "|" || !seenKeys.add(dedupKey)) continue
             val matchedItunes = findMatchingItunesTrack(lead.title, lead.artist, itunesTracks)
             candidates += SongCandidate(
                 metadata = TrackMetadata(
@@ -410,36 +533,31 @@ class MusicRepository(
                 syncedLyricsRaw = null,
                 plainLyricsRaw = null,
             )
-            if (candidates.size >= 16) break
-        }
-
-        if (candidates.size < 8) {
-            for (track in itunesTracks) {
-                val title = track.trackName.orEmpty().trim()
-                val artist = track.artistName.orEmpty().trim()
-                if (title.isBlank() || artist.isBlank()) continue
-                val dedupKey = "${normalizeText(title)}|${normalizeText(artist)}"
-                if (!seenKeys.add(dedupKey)) continue
-
-                candidates += SongCandidate(
-                    metadata = TrackMetadata(
-                        id = "itunes_${track.trackId}",
-                        title = title,
-                        artist = artist,
-                        album = track.collectionName.orEmpty(),
-                        durationMs = track.trackTimeMillis ?: 0L,
-                        artworkUrl = track.artworkUrl100?.toHighResArtwork(),
-                        previewUrl = track.previewUrl,
-                        sourceLabel = "iTunes",
-                    ),
-                    syncedLyricsRaw = null,
-                    plainLyricsRaw = null,
-                )
-                if (candidates.size >= 14) break
-            }
+            if (candidates.size >= 26) break
         }
 
         candidates
+    }
+
+    private fun isPredominantlyLatin(text: String): Boolean {
+        val letters = text.filter { it.isLetter() }
+        if (letters.isEmpty()) return false
+        val asciiLetters = letters.count { it in 'a'..'z' || it in 'A'..'Z' }
+        return asciiLetters.toFloat() / letters.length.toFloat() >= 0.7f
+    }
+
+    private fun matchesPreferredScript(text: String, langCode: String): Boolean = when (langCode) {
+        "ja" -> text.any { ch ->
+            val cp = ch.code
+            cp in 0x3040..0x30FF || cp in 0x4E00..0x9FFF
+        }
+        "ko" -> text.any { ch -> ch.code in 0xAC00..0xD7AF || ch.code in 0x1100..0x11FF }
+        "zh-CN" -> text.any { ch -> ch.code in 0x4E00..0x9FFF }
+        "ar" -> text.any { ch -> ch.code in 0x0600..0x06FF }
+        "hi" -> text.any { ch -> ch.code in 0x0900..0x097F }
+        "ru" -> text.any { ch -> ch.code in 0x0400..0x04FF }
+        "th" -> text.any { ch -> ch.code in 0x0E00..0x0E7F }
+        else -> false
     }
 
     /**
@@ -618,15 +736,44 @@ class MusicRepository(
                 candidate.syncedLyricsRaw to candidate.plainLyricsRaw
             } else {
                 val primaryArtist = artist.substringBefore(",").substringBefore("&").trim()
-                val fetched = runCatching {
+                val baseTitle = title.substringBefore(" (").substringBefore(" - ").trim()
+                val targetDurSec = candidate.metadata.durationMs / 1000.0
+
+                val byFields = runCatching {
                     lrcLibApi.searchByFields(trackName = title, artistName = primaryArtist.ifBlank { null })
                 }.onFailure { if (it is CancellationException) throw it }
                     .getOrDefault(emptyList())
-                    .firstOrNull { !it.syncedLyrics.isNullOrBlank() }
-                    ?: runCatching { lrcLibApi.searchByQuery("$title $primaryArtist".trim()) }
+
+                val byQuery = if (byFields.none { !it.syncedLyrics.isNullOrBlank() }) {
+                    runCatching { lrcLibApi.searchByQuery("$title $primaryArtist".trim()) }
                         .onFailure { if (it is CancellationException) throw it }
                         .getOrDefault(emptyList())
-                        .firstOrNull { !it.syncedLyrics.isNullOrBlank() || !it.plainLyrics.isNullOrBlank() }
+                } else {
+                    emptyList()
+                }
+
+                val byBaseTitle = if ((byFields + byQuery).none { !it.syncedLyrics.isNullOrBlank() } &&
+                    baseTitle.isNotBlank() && baseTitle != title
+                ) {
+                    runCatching { lrcLibApi.searchByQuery("$baseTitle $primaryArtist".trim()) }
+                        .onFailure { if (it is CancellationException) throw it }
+                        .getOrDefault(emptyList())
+                } else {
+                    emptyList()
+                }
+
+                val combined = (byFields + byQuery + byBaseTitle).distinctBy { it.id }
+                val syncedMatches = combined.filter { !it.syncedLyrics.isNullOrBlank() }
+                val bestSynced = if (targetDurSec > 20.0 && syncedMatches.isNotEmpty()) {
+                    syncedMatches.minByOrNull { rec ->
+                        val recDur = rec.duration ?: targetDurSec
+                        abs(recDur - targetDurSec)
+                    }
+                } else {
+                    syncedMatches.firstOrNull()
+                }
+
+                val fetched = bestSynced ?: combined.firstOrNull { !it.plainLyrics.isNullOrBlank() }
                 fetched?.syncedLyrics to (fetched?.plainLyrics ?: candidate.plainLyricsRaw)
             }
         }
@@ -724,7 +871,8 @@ class MusicRepository(
     ): Pair<Long, Float>? {
         val cleaned = normalizeText(heardPhrase)
         val heardTokens = cleaned.split(" ").filter { it.length >= 2 }
-        if (heardTokens.size < 2) return null
+        val hasNonAscii = cleaned.any { it.code > 127 }
+        if (heardTokens.size < 2 && !(hasNonAscii && cleaned.length >= 3)) return null
 
         val vocalLines = lines.filter { !it.isInstrumental && it.rawText.isNotBlank() }
         if (vocalLines.isEmpty()) return null
@@ -769,7 +917,7 @@ class MusicRepository(
         raw.lowercase()
             .replace("'", "")
             .replace("’", "")
-            .replace(Regex("[^a-z0-9\\s]"), " ")
+            .replace(Regex("[^\\p{L}\\p{N}\\s]"), " ")
             .replace(Regex("\\s+"), " ")
             .trim()
 
@@ -808,12 +956,23 @@ class MusicRepository(
     ): Float {
         val heard = normalizeText(heardRaw)
         val cand = normalizeText(candidateRaw)
-        if (heard.length < 3 || cand.length < 3) return 0f
+        if (heard.length < 2 || cand.length < 2) return 0f
         if (heard == cand) return 1f
 
         val hWords = heard.split(" ").filter { it.length >= 2 }
         val cWords = cand.split(" ").filter { it.length >= 2 }
-        if (hWords.isEmpty() || cWords.isEmpty()) return 0f
+
+        // For unspaced scripts (Japanese, Chinese, Thai) use character n-gram overlap directly
+        val compactHeard = heard.replace(" ", "")
+        val compactCand = cand.replace(" ", "")
+        if (hWords.size <= 1 || cWords.size <= 1) {
+            val ngramScore = maxOf(
+                charNgramCosine(compactHeard, compactCand, 2),
+                charNgramCosine(compactHeard, compactCand, 3),
+            )
+            val containsBoost = if (compactHeard.length >= 3 && compactCand.contains(compactHeard)) 0.25f else 0f
+            return (ngramScore * 0.90f + containsBoost + proximityBonus.coerceIn(0f, 1f) * 0.08f).coerceIn(0f, 1f)
+        }
 
         val cSet = cWords.toSet()
         val cPhonSet = cWords.map { phoneticKey(it) }.toSet()
@@ -843,7 +1002,7 @@ class MusicRepository(
             exactRecall
         }
 
-        val trigramScore = charTrigramCosine(heard, cand)
+        val trigramScore = charNgramCosine(heard, cand, 3)
         val raw = (exactRecall * 0.36f) +
             (phonRecall * 0.28f) +
             (bigramScore * 0.16f) +
@@ -852,16 +1011,16 @@ class MusicRepository(
         return raw.coerceIn(0f, 1f)
     }
 
-    private fun charTrigramCosine(a: String, b: String): Float {
-        if (a.length < 3 || b.length < 3) return 0f
+    private fun charNgramCosine(a: String, b: String, n: Int): Float {
+        if (a.length < n || b.length < n) return 0f
         val mapA = HashMap<String, Int>()
         val mapB = HashMap<String, Int>()
-        for (i in 0..a.length - 3) {
-            val g = a.substring(i, i + 3)
+        for (i in 0..a.length - n) {
+            val g = a.substring(i, i + n)
             mapA[g] = (mapA[g] ?: 0) + 1
         }
-        for (i in 0..b.length - 3) {
-            val g = b.substring(i, i + 3)
+        for (i in 0..b.length - n) {
+            val g = b.substring(i, i + n)
             mapB[g] = (mapB[g] ?: 0) + 1
         }
         var dot = 0f

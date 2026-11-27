@@ -23,9 +23,12 @@
 
     <!-- Search Sheet -->
     <string name="search_title">Find Track</string>
-    <string name="search_placeholder">Song title, artist, or lyric line…</string>
-    <string name="search_empty_prompt">Search live across LRCLIB, iTunes, and Deezer for real synced lyrics and tempo metadata.</string>
-    <string name="search_no_results">No synced tracks found for this query. Try another title or artist.</string>
+    <string name="search_placeholder">Song, artist, or lyrics in any language…</string>
+    <string name="search_empty_prompt">Search songs in any language across LRCLIB, iTunes, Deezer, and Genius for synced lyrics and tempo.</string>
+    <string name="search_no_results">No tracks found for this query. Try another spelling, script, or switch the language filter.</string>
+    <string name="search_language_label">Search language</string>
+    <string name="search_language_dropdown_cd">Select song search language</string>
+    <string name="search_clear_cd">Clear search</string>
     <string name="search_synced_badge">SYNCED</string>
     <string name="search_plain_badge">PLAIN</string>
 
@@ -34,10 +37,12 @@
     <string name="lyrics_search_cd">Search another song</string>
     <string name="lyrics_play_cd">Resume lyric playback</string>
     <string name="lyrics_pause_cd">Pause lyric playback</string>
-    <string name="lyrics_mic_sync_on">Live Sync</string>
-    <string name="lyrics_mic_sync_off">Sync Off</string>
+    <string name="lyrics_mic_sync_on">Live Beat Visuals On</string>
+    <string name="lyrics_mic_sync_off">Live Beat Visuals Off</string>
+    <string name="lyrics_sync_once">Sync</string>
+    <string name="lyrics_synced_locked">Synced</string>
     <string name="lyrics_relock_vocals">Re-sync</string>
-    <string name="lyrics_relocking">Re-syncing to audio…</string>
+    <string name="lyrics_relocking">Syncing to live audio…</string>
     <string name="lyrics_translate_cd">Translate lyrics</string>
     <string name="lyrics_translate_label">Translate</string>
     <string name="lyrics_return_to_live">Sync to live</string>
@@ -60,17 +65,18 @@
     <string name="engine_live_spectrum">LIVE MICROPHONE SPECTRUM</string>
     <string name="engine_detected_bpm">LIVE MIC BPM</string>
     <string name="engine_track_bpm">TRACK BPM</string>
-    <string name="engine_tempo_lock">BEAT PLL</string>
+    <string name="engine_tempo_lock">CLOCK LOCK</string>
     <string name="engine_vocal_band">VOCAL BAND</string>
     <string name="engine_bass_energy">BASS PULSE</string>
-    <string name="engine_acoustic_drift">DRIFT LOCK</string>
+    <string name="engine_acoustic_drift">SYNC STATE</string>
     <string name="engine_offset_title">Timing Offset</string>
     <string name="engine_offset_reset">Reset</string>
+    <string name="engine_force_resync">Re-sync From Live Audio</string>
     <string name="engine_timing_source">WORD PACING ENGINE</string>
     <string name="engine_source_enhanced">Enhanced LRC Word Tags</string>
-    <string name="engine_source_prosodic">Beat-Quantized Syllable Engine</string>
+    <string name="engine_source_prosodic">Universal Multilingual Syllable Engine</string>
     <string name="engine_source_plain">Tempo-Distributed Plain Lyrics</string>
-    <string name="engine_dsp_notice">Free acoustic fingerprinting matches live songs and exact timestamps, while 16-band DSP tracks beat tempo and vocal drift.</string>
+    <string name="engine_dsp_notice">Once a song locks via acoustic fingerprint or Phone Sync, Cadence holds a steady 1.0x studio clock so lyrics stay smoothly synced without re-listening.</string>
     <string name="engine_audd_token_title">Backup AudD Token (Optional)</string>
     <string name="engine_audd_token_placeholder">Optional backup key (not required)</string>
     <string name="engine_audd_token_save">Save</string>

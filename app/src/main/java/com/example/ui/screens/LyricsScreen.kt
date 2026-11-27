@@ -32,6 +32,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.Hearing
 import androidx.compose.material.icons.rounded.Mic
@@ -187,6 +188,7 @@ private fun CompactPhoneLyricsLayout(
             track = track,
             liveBpm = uiState.telemetry.detectedBpm,
             beatIntensity = uiState.telemetry.beatIntensity,
+            isTrackSynced = uiState.isTrackSynced,
             isMicSyncEnabled = uiState.isMicSyncEnabled,
             isDeviceBroadcastSynced = uiState.isDeviceBroadcastSynced,
             highlightTint = uiState.ambientPalette.highlightTint,
@@ -392,6 +394,7 @@ private fun TopTrackGlassBar(
     track: SyncedTrack,
     liveBpm: Float?,
     beatIntensity: Float,
+    isTrackSynced: Boolean,
     isMicSyncEnabled: Boolean,
     isDeviceBroadcastSynced: Boolean,
     highlightTint: Color,
@@ -466,7 +469,7 @@ private fun TopTrackGlassBar(
                         modifier = Modifier.weight(1f, fill = false),
                     )
                     val displayBpm = liveBpm ?: track.metadata.bpm
-                    if (displayBpm != null || isMicSyncEnabled || isDeviceBroadcastSynced) {
+                    if (displayBpm != null || isTrackSynced || isMicSyncEnabled || isDeviceBroadcastSynced) {
                         Spacer(modifier = Modifier.width(8.dp))
                         Box(
                             modifier = Modifier
@@ -477,7 +480,7 @@ private fun TopTrackGlassBar(
                                 }
                                 .clip(CircleShape)
                                 .background(
-                                    if (isMicSyncEnabled || isDeviceBroadcastSynced) {
+                                    if (isTrackSynced || isMicSyncEnabled || isDeviceBroadcastSynced) {
                                         highlightTint
                                     } else {
                                         Color.White.copy(alpha = 0.4f)
@@ -487,8 +490,9 @@ private fun TopTrackGlassBar(
                         Spacer(modifier = Modifier.width(5.dp))
                         val badgeLabel = when {
                             isDeviceBroadcastSynced -> "PHONE SYNC"
+                            isTrackSynced -> "SYNCED"
                             displayBpm != null -> "${displayBpm.roundToInt()} BPM"
-                            else -> "SYNC"
+                            else -> "LIVE"
                         }
                         Text(
                             text = badgeLabel,
@@ -688,12 +692,19 @@ private fun FloatingLyricsControlDock(
                     )
                 }
 
-                // Instant acoustic re-sync pill (re-anchors lyrics to exact live second)
+                // One-shot acoustic sync pill: shows "Synced" with checkmark once locked so it never re-syncs unnecessarily
+                val isSyncedLocked = uiState.isTrackSynced && !isRelocking
                 LiquidGlassPillButton(
                     onClick = {
-                        if (hasMicPermission) onRelockLine() else onRequestMicPermission()
+                        if (isSyncedLocked) {
+                            // Already synced — no need to re-listen
+                        } else if (hasMicPermission) {
+                            onRelockLine()
+                        } else {
+                            onRequestMicPermission()
+                        }
                     },
-                    isActive = isRelocking,
+                    isActive = isRelocking || isSyncedLocked,
                     accentColor = accent,
                     modifier = Modifier.testTag("lyrics_relock_button"),
                 ) {
@@ -702,14 +713,18 @@ private fun FloatingLyricsControlDock(
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
                     ) {
                         Icon(
-                            imageVector = Icons.Rounded.Hearing,
+                            imageVector = if (isSyncedLocked) Icons.Rounded.CheckCircle else Icons.Rounded.Hearing,
                             contentDescription = null,
                             tint = Color.White,
                             modifier = Modifier.size(18.dp),
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = stringResource(R.string.lyrics_relock_vocals),
+                            text = if (isSyncedLocked) {
+                                stringResource(R.string.lyrics_synced_locked)
+                            } else {
+                                stringResource(R.string.lyrics_sync_once)
+                            },
                             style = MaterialTheme.typography.labelLarge,
                             color = Color.White,
                             maxLines = 1,
