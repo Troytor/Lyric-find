@@ -8,24 +8,6 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToLong
 
-data class CloudVocalProfile(
-    val isAvailable: Boolean,
-    val statusNote: String,
-)
-
-interface CloudAiPacingRepository {
-    fun getCloudStatus(): CloudVocalProfile
-}
-
-class LocalOnDevicePacingRepository(
-    private val neuralNet: LocalCadenceNeuralNet = LocalCadenceNeuralNet(),
-) : CloudAiPacingRepository {
-    override fun getCloudStatus(): CloudVocalProfile = CloudVocalProfile(
-        isAvailable = true,
-        statusNote = "${neuralNet.modelName} (${neuralNet.parameterCount} params) running locally on-device for vocal VAD, beat lock, and word pacing.",
-    )
-}
-
 data class SynthesizedLyricsResult(
     val lines: List<LyricLine>,
     val timingSource: TimingSource,
@@ -33,12 +15,12 @@ data class SynthesizedLyricsResult(
 )
 
 /**
- * Local AI word-pacing & beat-alignment engine backed by CadenceNet-Nano.
- * Transforms standard line-level LRC timestamps into smooth word-by-word fill timings.
+ * Deterministic prosodic & musical beat-grid word-pacing engine.
+ * Transforms standard line-level LRC timestamps into smooth word-by-word fill timings
+ * based on syllable count, phoneme sustain weights, function-word reduction,
+ * phrase-final lengthening, and soft beat-grid alignment.
  */
-class WordPacingMlEngine(
-    private val neuralNet: LocalCadenceNeuralNet = LocalCadenceNeuralNet(),
-) {
+class WordPacingMlEngine {
 
     private val unstressedLexicon = setOf(
         "a", "an", "the", "to", "of", "in", "on", "at", "by", "for", "and", "or",
@@ -48,7 +30,6 @@ class WordPacingMlEngine(
 
     private val vowelSet = setOf('a', 'e', 'i', 'o', 'u', 'y')
     private val sustainedConsonants = setOf('m', 'n', 'l', 'r', 's', 'z', 'f', 'v', 'h')
-    private val plosiveConsonants = setOf('p', 'b', 't', 'd', 'k', 'g')
 
     fun synthesizeFromSyncedLrc(
         rawLrc: String,
@@ -58,7 +39,7 @@ class WordPacingMlEngine(
         val parsed = LrcParser.parse(rawLrc)
         val rawLines = parsed.lines
         if (rawLines.isEmpty()) {
-            return SynthesizedLyricsResult(emptyList(), TimingSource.LOCAL_NEURAL_CADENCE_ENGINE, 0f)
+            return SynthesizedLyricsResult(emptyList(), TimingSource.PROSODIC_BEAT_ENGINE, 0f)
         }
 
         val effectiveDuration = max(
@@ -109,7 +90,6 @@ class WordPacingMlEngine(
                     text = current.text,
                     lineStartMs = current.startMs,
                     lineEndMs = lineEndMs,
-                    bpm = bpm,
                     beatPeriodMs = beatPeriodMs,
                 )
             }
@@ -139,12 +119,12 @@ class WordPacingMlEngine(
         val source = if (parsed.hasEnhancedWordTags) {
             TimingSource.ENHANCED_LRC
         } else {
-            TimingSource.LOCAL_NEURAL_CADENCE_ENGINE
+            TimingSource.PROSODIC_BEAT_ENGINE
         }
         val confidence = when {
             parsed.hasEnhancedWordTags -> 0.98f
-            bpm != null && bpm > 40f -> 0.93f
-            else -> 0.87f
+            bpm != null && bpm > 40f -> 0.92f
+            else -> 0.85f
         }
         return SynthesizedLyricsResult(output, source, confidence)
     }
@@ -167,7 +147,7 @@ class WordPacingMlEngine(
         val lineWeights = textLines.map { line ->
             val words = line.split(Regex("\\s+")).filter { it.isNotBlank() }
             words.mapIndexed { idx, w ->
-                scoreWordWithNeuralNet(w, idx == 0, idx == words.lastIndex, bpm).durationWeight.toDouble()
+                computeWordProsodicWeight(w, idx == words.lastIndex).toDouble()
             }.sum().coerceAtLeast(1.5)
         }
         val weightSum = lineWeights.sum().coerceAtLeast(1.0)
@@ -181,7 +161,6 @@ class WordPacingMlEngine(
                 text = lineText,
                 lineStartMs = cursorMs,
                 lineEndMs = (endMs - 140L).coerceAtLeast(cursorMs + 500L),
-                bpm = bpm,
                 beatPeriodMs = beatPeriodMs,
             )
             resultLines += LyricLine(
@@ -195,7 +174,7 @@ class WordPacingMlEngine(
             cursorMs = endMs
         }
 
-        return SynthesizedLyricsResult(resultLines, TimingSource.PLAIN_ESTIMATED, 0.62f)
+        return SynthesizedLyricsResult(resultLines, TimingSource.PLAIN_ESTIMATED, 0.60f)
     }
 
     fun refineWithLiveBpm(lines: List<LyricLine>, liveBpm: Float): List<LyricLine> {
@@ -209,7 +188,6 @@ class WordPacingMlEngine(
                         text = line.rawText,
                         lineStartMs = line.startMs,
                         lineEndMs = line.endMs,
-                        bpm = liveBpm,
                         beatPeriodMs = beatPeriodMs,
                     ),
                 )
@@ -221,7 +199,6 @@ class WordPacingMlEngine(
         text: String,
         lineStartMs: Long,
         lineEndMs: Long,
-        bpm: Float?,
         beatPeriodMs: Float?,
     ): List<WordTiming> {
         val tokens = text.split(Regex("\\s+")).filter { it.isNotBlank() }
@@ -235,16 +212,9 @@ class WordPacingMlEngine(
         }
         val vocalSpanMs = (rawSpanMs - breathGapMs).coerceAtLeast(200L)
 
-        // Run local CadenceNet-Nano word-pacing head on every token
-        val neuralOutputs = tokens.mapIndexed { idx, token ->
-            scoreWordWithNeuralNet(
-                token = token,
-                isLineStart = idx == 0,
-                isPhraseFinal = idx == tokens.lastIndex,
-                bpm = bpm,
-            )
+        val weights = tokens.mapIndexed { idx, token ->
+            computeWordProsodicWeight(token, isPhraseFinal = idx == tokens.lastIndex)
         }
-
         val pauseAfterWeights = tokens.mapIndexed { idx, token ->
             when {
                 idx == tokens.lastIndex -> 0f
@@ -255,8 +225,7 @@ class WordPacingMlEngine(
             }
         }
 
-        val totalUnits = (neuralOutputs.sumOf { it.durationWeight.toDouble() }.toFloat() + pauseAfterWeights.sum())
-            .coerceAtLeast(0.5f)
+        val totalUnits = (weights.sum() + pauseAfterWeights.sum()).coerceAtLeast(0.5f)
         val msPerUnit = vocalSpanMs / totalUnits
         val minWordMs = min(115L, vocalSpanMs / max(1, tokens.size))
 
@@ -264,16 +233,17 @@ class WordPacingMlEngine(
         var cursor = lineStartMs.toFloat()
 
         for (i in tokens.indices) {
-            val prediction = neuralOutputs[i]
-            val wordDur = max(minWordMs.toFloat(), prediction.durationWeight * msPerUnit)
+            val wordDur = max(minWordMs.toFloat(), weights[i] * msPerUnit)
             val start = cursor.roundToLong()
             val end = (cursor + wordDur).roundToLong().coerceAtMost(lineStartMs + vocalSpanMs)
+            val clean = tokens[i].lowercase().filter { it.isLetter() }
+            val stress = if (clean in unstressedLexicon) 0.45f else 1.0f
 
             initial += WordTiming(
                 text = tokens[i],
                 startMs = start,
                 endMs = max(start + 70L, end),
-                stressWeight = prediction.beatAttraction,
+                stressWeight = stress,
                 isBeatAligned = false,
             )
             cursor += wordDur + (pauseAfterWeights[i] * msPerUnit)
@@ -286,35 +256,16 @@ class WordPacingMlEngine(
         }
     }
 
-    private fun scoreWordWithNeuralNet(
-        token: String,
-        isLineStart: Boolean,
-        isPhraseFinal: Boolean,
-        bpm: Float?,
-    ): WordNeuralOutput {
+    private fun computeWordProsodicWeight(token: String, isPhraseFinal: Boolean): Float {
         val letters = token.lowercase().filter { it.isLetter() }
-        val len = letters.length.coerceAtLeast(1)
-        val syllables = if (letters.isEmpty()) 1 else estimateSyllables(letters)
-        val vowelCount = letters.count { it in vowelSet }
-        val sustainCount = letters.count { it in sustainedConsonants }
-        val plosiveCount = letters.count { it in plosiveConsonants }
-        val isFunc = if (letters in unstressedLexicon) 1f else 0f
-        val hasPause = if (token.endsWith(",") || token.endsWith(".") || token.endsWith("!") || token.endsWith("?")) 1f else 0f
-        val normTempo = ((bpm ?: 110f) / 140f).coerceIn(0.4f, 1.5f)
-
-        val features = WordFeatureVector(
-            normSyllables = (syllables / 3f).coerceIn(0.2f, 2.2f),
-            vowelRatio = vowelCount.toFloat() / len.toFloat(),
-            sustainRatio = sustainCount.toFloat() / len.toFloat(),
-            plosiveRatio = plosiveCount.toFloat() / len.toFloat(),
-            normLength = (len / 7f).coerceIn(0.15f, 2.0f),
-            isFunctionWord = isFunc,
-            isLineStart = if (isLineStart) 1f else 0f,
-            isPhraseFinal = if (isPhraseFinal) 1f else 0f,
-            hasPausePunctuation = hasPause,
-            normTempo = normTempo,
-        )
-        return neuralNet.inferWordPacing(features)
+        if (letters.isEmpty()) return 0.65f
+        val syllables = estimateSyllables(letters)
+        val consonantWeight = letters.count { it !in vowelSet } * 0.06f
+        val sustainBonus = letters.count { it in sustainedConsonants } * 0.09f
+        val base = (syllables * 0.88f) + consonantWeight + sustainBonus
+        val functionFactor = if (letters in unstressedLexicon && !isPhraseFinal) 0.70f else 1.0f
+        val phraseFinalFactor = if (isPhraseFinal) 1.32f else 1.0f
+        return (base * functionFactor * phraseFinalFactor).coerceIn(0.45f, 5.2f)
     }
 
     private fun applySoftBeatGridPull(
@@ -328,15 +279,14 @@ class WordPacingMlEngine(
 
         for (i in 1 until adjusted.size) {
             val current = adjusted[i]
-            if (current.stressWeight < 0.45f) continue
+            if (current.stressWeight < 0.7f) continue
 
             val relative = (current.startMs - lineStartMs).toFloat()
             val nearestSubdivision = (relative / eighthNoteMs).roundToLong() * eighthNoteMs
             val delta = nearestSubdivision - relative
 
             if (abs(delta) <= eighthNoteMs * 0.30f) {
-                val pullFactor = (0.28f + current.stressWeight * 0.32f).coerceIn(0.25f, 0.58f)
-                val pulledStart = (current.startMs + (delta * pullFactor)).roundToLong()
+                val pulledStart = (current.startMs + (delta * 0.45f)).roundToLong()
                 val prev = adjusted[i - 1]
                 val safeMin = prev.startMs + 90L
                 val safeMax = current.endMs - 90L

@@ -3,15 +3,23 @@
 
     <!-- Listen Screen -->
     <string name="listen_headline_idle">Tap to hear the song</string>
-    <string name="listen_subtitle_idle">Listens to live vocals, fetches synced lyrics, and locks word pace to the beat</string>
+    <string name="listen_subtitle_idle">Identifies any playing song for free, syncs word-by-word lyrics, and follows the beat</string>
+    <string name="listen_headline_recording">Listening to music…</string>
     <string name="listen_headline_active">Listening to vocals…</string>
-    <string name="listen_headline_matching">Matching lyrics online…</string>
-    <string name="listen_headline_loading">Building word cadence…</string>
+    <string name="listen_headline_matching">Identifying song…</string>
+    <string name="listen_headline_loading">Loading synced lyrics…</string>
     <string name="listen_tap_to_stop">Tap orb to cancel</string>
     <string name="listen_search_pill">Search any song or artist</string>
-    <string name="listen_mic_permission_needed">Microphone access is required to hear songs and sync lyrics to the live beat.</string>
+    <string name="listen_mic_permission_needed">Microphone access is required to identify music and sync lyrics to the live beat.</string>
     <string name="listen_mic_permission_grant">Enable Microphone</string>
-    <string name="listen_no_match_tip">Move closer to the speaker during vocals, or search the track directly.</string>
+    <string name="listen_no_match_tip">Hold closer to the speaker, share from your music app, or search directly.</string>
+
+    <!-- On-Device Now Playing -->
+    <string name="phone_now_playing_label">PLAYING ON YOUR PHONE</string>
+    <string name="phone_now_playing_paused_label">PAUSED ON YOUR PHONE</string>
+    <string name="phone_now_playing_sync">Sync Lyrics</string>
+    <string name="phone_music_active_title">Music playing on your phone</string>
+    <string name="phone_music_active_hint">Turn on Device Broadcast Status in Spotify or your player, or tap Share → Cadence to load synced lyrics.</string>
 
     <!-- Search Sheet -->
     <string name="search_title">Find Track</string>
@@ -26,15 +34,26 @@
     <string name="lyrics_search_cd">Search another song</string>
     <string name="lyrics_play_cd">Resume lyric playback</string>
     <string name="lyrics_pause_cd">Pause lyric playback</string>
-    <string name="lyrics_mic_sync_on">Live Mic Sync</string>
-    <string name="lyrics_mic_sync_off">Mic Sync Off</string>
-    <string name="lyrics_relock_vocals">Re-lock</string>
-    <string name="lyrics_relocking">Hearing line…</string>
-    <string name="lyrics_return_to_live">Return to live</string>
+    <string name="lyrics_mic_sync_on">Live Sync</string>
+    <string name="lyrics_mic_sync_off">Sync Off</string>
+    <string name="lyrics_relock_vocals">Re-sync</string>
+    <string name="lyrics_relocking">Re-syncing to audio…</string>
+    <string name="lyrics_translate_cd">Translate lyrics</string>
+    <string name="lyrics_translate_label">Translate</string>
+    <string name="lyrics_return_to_live">Sync to live</string>
     <string name="lyrics_calibration_cd">Open acoustic sync calibration</string>
     <string name="lyrics_album_art_cd">Album artwork</string>
     <string name="lyrics_instrumental_label">Instrumental</string>
     <string name="lyrics_no_lyrics_available">No lyrics were returned by LRCLIB for this track.</string>
+    <string name="lyrics_waiting_for_music">Waiting for music…</string>
+    <string name="lyrics_nudge_earlier">-0.2s</string>
+    <string name="lyrics_nudge_later">+0.2s</string>
+
+    <!-- Translation Sheet -->
+    <string name="translate_sheet_title">Translate Lyrics</string>
+    <string name="translate_sheet_subtitle">Show synchronized translations directly under each lyric line</string>
+    <string name="translate_off_button">Show Original Only</string>
+    <string name="translate_detected_label">Detected original language: %1$s</string>
 
     <!-- Acoustic Calibration & Engine Sheet -->
     <string name="engine_sheet_title">Acoustic Sync Engine</string>
@@ -42,15 +61,17 @@
     <string name="engine_detected_bpm">LIVE MIC BPM</string>
     <string name="engine_track_bpm">TRACK BPM</string>
     <string name="engine_tempo_lock">BEAT PLL</string>
-    <string name="engine_neural_vocal">AI VOCAL</string>
-    <string name="engine_neural_beat">AI BEAT</string>
+    <string name="engine_vocal_band">VOCAL BAND</string>
+    <string name="engine_bass_energy">BASS PULSE</string>
     <string name="engine_acoustic_drift">DRIFT LOCK</string>
     <string name="engine_offset_title">Timing Offset</string>
     <string name="engine_offset_reset">Reset</string>
-    <string name="engine_timing_source">LOCAL NEURAL MODEL</string>
+    <string name="engine_timing_source">WORD PACING ENGINE</string>
     <string name="engine_source_enhanced">Enhanced LRC Word Tags</string>
-    <string name="engine_source_ml">CadenceNet-Nano · Local Neural Engine</string>
+    <string name="engine_source_prosodic">Beat-Quantized Syllable Engine</string>
     <string name="engine_source_plain">Tempo-Distributed Plain Lyrics</string>
-    <string name="engine_firebase_notice">CadenceNet-Nano runs 100% locally on-device for vocal activity detection, acoustic drift lock, and word pacing.</string>
-    <string name="lyrics_waiting_for_music">Waiting for room audio…</string>
+    <string name="engine_dsp_notice">Free acoustic fingerprinting matches live songs and exact timestamps, while 16-band DSP tracks beat tempo and vocal drift.</string>
+    <string name="engine_audd_token_title">Backup AudD Token (Optional)</string>
+    <string name="engine_audd_token_placeholder">Optional backup key (not required)</string>
+    <string name="engine_audd_token_save">Save</string>
 </resources>

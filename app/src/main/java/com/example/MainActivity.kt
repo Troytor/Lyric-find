@@ -1,6 +1,7 @@
 package com.example
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color as AndroidColor
 import android.os.Bundle
@@ -51,6 +52,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.model.AppStage
@@ -58,6 +60,7 @@ import com.example.ui.components.LiquidGlassBackground
 import com.example.ui.components.LiquidGlassSurface
 import com.example.ui.components.SearchOverlaySheet
 import com.example.ui.components.SyncEngineBottomSheet
+import com.example.ui.components.TranslationBottomSheet
 import com.example.ui.screens.ListenScreen
 import com.example.ui.screens.LyricsScreen
 import com.example.ui.theme.CadenceTheme
@@ -65,15 +68,49 @@ import com.example.viewmodel.CadenceViewModel
 import kotlinx.coroutines.delay
 
 class MainActivity : ComponentActivity() {
+
+    private lateinit var cadenceViewModel: CadenceViewModel
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
         )
+        cadenceViewModel = ViewModelProvider(this)[CadenceViewModel::class.java]
+        processIncomingShareIntent(intent)
+
         setContent {
             CadenceTheme {
-                CadenceAppRoot()
+                CadenceAppRoot(viewModel = cadenceViewModel)
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        processIncomingShareIntent(intent)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::cadenceViewModel.isInitialized) {
+            cadenceViewModel.refreshDeviceAudioState()
+        }
+    }
+
+    private fun processIncomingShareIntent(incomingIntent: Intent?) {
+        if (incomingIntent?.action == Intent.ACTION_SEND &&
+            incomingIntent.type?.startsWith("text/") == true
+        ) {
+            val sharedText = incomingIntent.getStringExtra(Intent.EXTRA_TEXT)
+                ?: incomingIntent.getStringExtra(Intent.EXTRA_SUBJECT)
+            if (!sharedText.isNullOrBlank()) {
+                cadenceViewModel.handleSharedIntentText(sharedText)
+                // Clear extra so configuration changes do not re-trigger the share intent
+                incomingIntent.removeExtra(Intent.EXTRA_TEXT)
+                incomingIntent.removeExtra(Intent.EXTRA_SUBJECT)
             }
         }
     }
@@ -114,10 +151,10 @@ fun CadenceAppRoot(
         }
     }
 
-    // Auto-clear transient error banners after 5.5s
+    // Auto-clear transient error banners after 6s
     LaunchedEffect(uiState.errorBanner) {
         if (uiState.errorBanner != null) {
-            delay(5_500L)
+            delay(6_000L)
             viewModel.dismissError()
         }
     }
@@ -152,6 +189,7 @@ fun CadenceAppRoot(
                             requestMicAndRun { viewModel.toggleListeningForSong() }
                         },
                         onOpenSearch = { viewModel.openSearch() },
+                        onSyncDeviceTrack = { viewModel.syncFromDeviceTrack() },
                     )
                 }
 
@@ -174,6 +212,8 @@ fun CadenceAppRoot(
                             onRelockLine = {
                                 requestMicAndRun { viewModel.relockCurrentLineWithMic() }
                             },
+                            onOpenTranslation = { viewModel.openTranslationSheet() },
+                            onQuickNudgeOffset = { delta -> viewModel.adjustSyncOffset(delta) },
                             onOpenCalibration = { viewModel.openCalibrationSheet() },
                             onSeekToMs = { ms -> viewModel.seekTo(ms, resumeIfPaused = true) },
                             onArtworkBitmapLoaded = { bmp -> viewModel.onArtworkLoaded(bmp) },
@@ -189,6 +229,7 @@ fun CadenceAppRoot(
                                 requestMicAndRun { viewModel.toggleListeningForSong() }
                             },
                             onOpenSearch = { viewModel.openSearch() },
+                            onSyncDeviceTrack = { viewModel.syncFromDeviceTrack() },
                         )
                     }
                 }
@@ -212,6 +253,19 @@ fun CadenceAppRoot(
             )
         }
 
+        // Musixmatch-style lyric translation language picker sheet
+        if (uiState.isTranslationSheetOpen) {
+            TranslationBottomSheet(
+                isTranslationEnabled = uiState.isTranslationEnabled,
+                selectedLanguage = uiState.selectedTranslationLang,
+                detectedSourceLang = uiState.detectedSourceLang,
+                palette = uiState.ambientPalette,
+                onSelectLanguage = { lang -> viewModel.selectTranslationLanguage(lang) },
+                onDisableTranslation = { viewModel.disableTranslation() },
+                onDismiss = { viewModel.closeTranslationSheet() },
+            )
+        }
+
         // Acoustic Sync Engine calibration & spectrum sheet
         val activeTrack = uiState.activeTrack
         if (uiState.isCalibrationOpen && activeTrack != null) {
@@ -220,10 +274,12 @@ fun CadenceAppRoot(
                 telemetry = uiState.telemetry,
                 syncOffsetMs = uiState.syncOffsetMs,
                 isMicSyncEnabled = uiState.isMicSyncEnabled,
-                cloudNotice = uiState.localAiSummary,
+                engineNotice = uiState.recognitionEngineNote,
+                customAudDToken = uiState.customAudDToken,
                 palette = uiState.ambientPalette,
                 onAdjustOffset = { delta -> viewModel.adjustSyncOffset(delta) },
                 onResetOffset = { viewModel.resetSyncOffset() },
+                onSaveAudDToken = { token -> viewModel.saveCustomAudDToken(token) },
                 onDismiss = { viewModel.closeCalibrationSheet() },
             )
         }

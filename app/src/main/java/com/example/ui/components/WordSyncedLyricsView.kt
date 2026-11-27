@@ -5,20 +5,26 @@ import android.os.SystemClock
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -64,6 +70,7 @@ import androidx.compose.ui.unit.sp
 import com.example.R
 import com.example.model.LyricLine
 import com.example.model.WordTiming
+import com.example.ui.theme.InterFontFamily
 import com.example.ui.theme.PlusJakartaSansFamily
 import com.example.viewmodel.PlaybackClockAnchor
 import kotlinx.coroutines.delay
@@ -71,8 +78,9 @@ import kotlinx.coroutines.launch
 import kotlin.math.abs
 
 /**
- * High-frame-rate word-by-word synced lyrics display with smooth horizontal gradient
- * word fill, vertical float micro-motion, progressive depth blur, and beat-synced interludes.
+ * High-frame-rate Musixmatch-inspired word-by-word synced lyrics display with
+ * smooth horizontal karaoke fill, synchronized dual-line translations, crisp
+ * upcoming line legibility, active spotlight accent bar, and beat-synced interludes.
  */
 @Composable
 fun WordSyncedLyricsView(
@@ -84,11 +92,12 @@ fun WordSyncedLyricsView(
     topContentPadding: PaddingValues,
     onLineTap: (Long) -> Unit,
     modifier: Modifier = Modifier,
+    isTranslationEnabled: Boolean = false,
+    translatedLines: Map<Int, String> = emptyMap(),
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
-    // Smooth choreographer-locked playback clock (60-120fps) without recomposing ViewModel
     var livePositionMs by remember { mutableLongStateOf(clockAnchor.currentPositionMs() + syncOffsetMs) }
 
     LaunchedEffect(clockAnchor, syncOffsetMs) {
@@ -104,7 +113,6 @@ fun WordSyncedLyricsView(
         }
     }
 
-    // Track whether the user manually scrolled away from the live focal line
     var userScrolledAway by remember { mutableStateOf(false) }
     LaunchedEffect(listState.isScrollInProgress) {
         if (listState.isScrollInProgress) {
@@ -116,20 +124,18 @@ fun WordSyncedLyricsView(
         derivedStateOf { findActiveLineIndex(lines, livePositionMs) }
     }
 
-    // Smooth auto-scroll keeping the active lyric positioned comfortably in the upper focal third
     LaunchedEffect(activeLineIndex, userScrolledAway) {
         if (!userScrolledAway && activeLineIndex >= 0 && activeLineIndex < lines.size) {
             listState.animateScrollToItem(
                 index = activeLineIndex,
-                scrollOffset = -170,
+                scrollOffset = -165,
             )
         }
     }
 
-    // Auto-recenter after 6 seconds if user stopped scrolling manually
     LaunchedEffect(userScrolledAway, listState.isScrollInProgress) {
         if (userScrolledAway && !listState.isScrollInProgress) {
-            delay(6_000L)
+            delay(5_500L)
             userScrolledAway = false
         }
     }
@@ -152,7 +158,7 @@ fun WordSyncedLyricsView(
             LazyColumn(
                 state = listState,
                 contentPadding = topContentPadding,
-                verticalArrangement = Arrangement.spacedBy(24.dp),
+                verticalArrangement = Arrangement.spacedBy(if (isTranslationEnabled) 20.dp else 18.dp),
                 modifier = Modifier
                     .fillMaxSize()
                     .testTag("lyrics_scroll_list"),
@@ -178,8 +184,10 @@ fun WordSyncedLyricsView(
                             },
                         )
                     } else {
+                        val translatedText = if (isTranslationEnabled) translatedLines[line.index] else null
                         WordSyncedLineItem(
                             line = line,
+                            translatedText = translatedText,
                             currentMs = livePositionMs,
                             isActive = isActive,
                             isPast = isPast,
@@ -195,21 +203,21 @@ fun WordSyncedLyricsView(
             }
         }
 
-        // Floating liquid glass "Return to live" button when user scrolls away
+        // Floating liquid glass "Sync to live" pill when user scrolls manually
         AnimatedVisibility(
             visible = userScrolledAway && activeLineIndex >= 0,
             enter = fadeIn() + slideInVertically { it / 2 },
             exit = fadeOut() + slideOutVertically { it / 2 },
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(bottom = 128.dp),
+                .padding(bottom = 178.dp),
         ) {
             LiquidGlassPillButton(
                 onClick = {
                     userScrolledAway = false
                     scope.launch {
                         if (activeLineIndex in lines.indices) {
-                            listState.animateScrollToItem(activeLineIndex, scrollOffset = -170)
+                            listState.animateScrollToItem(activeLineIndex, scrollOffset = -165)
                         }
                     }
                 },
@@ -243,6 +251,7 @@ fun WordSyncedLyricsView(
 @Composable
 private fun WordSyncedLineItem(
     line: LyricLine,
+    translatedText: String?,
     currentMs: Long,
     isActive: Boolean,
     isPast: Boolean,
@@ -251,40 +260,45 @@ private fun WordSyncedLineItem(
     onTap: () -> Unit,
 ) {
     val lineScale by animateFloatAsState(
-        targetValue = if (isActive) 1.0f else 0.92f,
+        targetValue = if (isActive) 1.0f else 0.94f,
         animationSpec = spring(dampingRatio = 0.78f, stiffness = 260f),
         label = "lineScale",
     )
     val lineAlpha by animateFloatAsState(
         targetValue = when {
             isActive -> 1.0f
+            isPast && distanceFromActive == 1 -> 0.42f
             isPast -> 0.28f
-            distanceFromActive == 1 -> 0.48f
-            else -> 0.30f
+            distanceFromActive == 1 -> 0.62f // Crisp Musixmatch preview of upcoming line
+            distanceFromActive == 2 -> 0.42f
+            else -> 0.28f
         },
         animationSpec = spring(dampingRatio = 0.85f, stiffness = 220f),
         label = "lineAlpha",
     )
+    // Keep immediate next/prev line razor-sharp so users can sing ahead effortlessly
     val blurRadiusDp = when {
-        isActive || Build.VERSION.SDK_INT < Build.VERSION_CODES.S -> 0.dp
-        distanceFromActive == 1 -> 1.2.dp
-        distanceFromActive == 2 -> 2.4.dp
-        else -> 3.6.dp
+        isActive || distanceFromActive <= 1 || Build.VERSION.SDK_INT < Build.VERSION_CODES.S -> 0.dp
+        distanceFromActive == 2 -> 1.1.dp
+        else -> 2.4.dp
     }
 
     val interactionSource = remember { MutableInteractionSource() }
     val blurModifier = if (blurRadiusDp > 0.dp) Modifier.blur(blurRadiusDp) else Modifier
+    val activeBg = if (isActive) Color.White.copy(alpha = 0.065f) else Color.Transparent
 
-    Box(
+    Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(18.dp))
+            .height(IntrinsicSize.Min)
+            .clip(RoundedCornerShape(20.dp))
+            .background(activeBg)
             .clickable(
                 interactionSource = interactionSource,
                 indication = ripple(color = Color.White.copy(alpha = 0.3f)),
                 onClick = onTap,
             )
-            .padding(horizontal = 8.dp, vertical = 6.dp)
+            .padding(horizontal = 10.dp, vertical = 10.dp)
             .graphicsLayer {
                 scaleX = lineScale
                 scaleY = lineScale
@@ -293,31 +307,69 @@ private fun WordSyncedLineItem(
             }
             .then(blurModifier),
     ) {
-        if (!isActive || line.words.isEmpty()) {
-            Text(
-                text = line.rawText,
-                style = TextStyle(
-                    fontFamily = PlusJakartaSansFamily,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 30.sp,
-                    lineHeight = 39.sp,
-                    letterSpacing = (-0.5).sp,
-                ),
-                color = Color.White,
+        // Subtle Musixmatch-style luminous focus bar on the active lyric line
+        if (isActive) {
+            Box(
+                modifier = Modifier
+                    .width(4.dp)
+                    .fillMaxHeight()
+                    .padding(vertical = 4.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(highlightTint),
             )
-        } else {
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(9.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                line.words.forEach { word ->
-                    WordKaraokeFillToken(
-                        word = word,
-                        currentMs = currentMs,
-                        highlightTint = highlightTint,
-                    )
+            Spacer(modifier = Modifier.width(12.dp))
+        }
+
+        Column(modifier = Modifier.weight(1f)) {
+            if (!isActive || line.words.isEmpty()) {
+                Text(
+                    text = line.rawText,
+                    style = TextStyle(
+                        fontFamily = PlusJakartaSansFamily,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 28.sp,
+                        lineHeight = 36.sp,
+                        letterSpacing = (-0.4).sp,
+                    ),
+                    color = Color.White,
+                )
+            } else {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    line.words.forEach { word ->
+                        WordKaraokeFillToken(
+                            word = word,
+                            currentMs = currentMs,
+                            highlightTint = highlightTint,
+                        )
+                    }
                 }
+            }
+
+            // Synchronized Musixmatch-style translation directly underneath each original line
+            AnimatedVisibility(
+                visible = !translatedText.isNullOrBlank(),
+                enter = fadeIn() + expandVertically(),
+                exit = fadeOut() + shrinkVertically(),
+            ) {
+                Text(
+                    text = translatedText.orEmpty(),
+                    style = TextStyle(
+                        fontFamily = InterFontFamily,
+                        fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Medium,
+                        fontSize = if (isActive) 17.sp else 15.sp,
+                        lineHeight = if (isActive) 23.sp else 20.sp,
+                    ),
+                    color = if (isActive) {
+                        highlightTint.copy(alpha = 0.96f)
+                    } else {
+                        Color.White.copy(alpha = 0.72f)
+                    },
+                    modifier = Modifier.padding(top = 6.dp),
+                )
             }
         }
     }
@@ -335,7 +387,6 @@ private fun WordKaraokeFillToken(
         else -> (currentMs - word.startMs).toFloat() / word.durationMs.toFloat()
     }.coerceIn(0f, 1f)
 
-    // Smooth ease-out curve for natural vocal fill motion
     val fillProgress = if (rawProgress in 0.001f..0.999f) {
         1f - ((1f - rawProgress) * (1f - rawProgress) * 0.35f + (1f - rawProgress) * 0.65f)
     } else {
@@ -344,14 +395,14 @@ private fun WordKaraokeFillToken(
 
     val isCurrentlySpoken = rawProgress in 0.01f..0.98f
     val floatLiftDp = when {
-        isCurrentlySpoken -> -2.8f * kotlin.math.sin(rawProgress * Math.PI).toFloat()
-        rawProgress >= 0.98f -> -0.6f
+        isCurrentlySpoken -> -2.4f * kotlin.math.sin(rawProgress * Math.PI).toFloat()
+        rawProgress >= 0.98f -> -0.5f
         else -> 0f
     }
 
     val wordBrush = when {
         fillProgress <= 0.005f -> Brush.horizontalGradient(
-            listOf(Color.White.copy(alpha = 0.38f), Color.White.copy(alpha = 0.38f)),
+            listOf(Color.White.copy(alpha = 0.42f), Color.White.copy(alpha = 0.42f)),
         )
         fillProgress >= 0.995f -> Brush.horizontalGradient(
             listOf(Color.White, Color.White),
@@ -362,9 +413,9 @@ private fun WordKaraokeFillToken(
             Brush.horizontalGradient(
                 0f to Color.White,
                 lead to Color.White,
-                ((lead + softEdge) * 0.5f) to highlightTint.copy(alpha = 0.92f),
-                softEdge to Color.White.copy(alpha = 0.38f),
-                1f to Color.White.copy(alpha = 0.38f),
+                ((lead + softEdge) * 0.5f) to highlightTint.copy(alpha = 0.94f),
+                softEdge to Color.White.copy(alpha = 0.42f),
+                1f to Color.White.copy(alpha = 0.42f),
             )
         }
     }
@@ -373,7 +424,7 @@ private fun WordKaraokeFillToken(
         Shadow(
             color = highlightTint.copy(alpha = 0.65f),
             offset = Offset(0f, 0f),
-            blurRadius = 18f,
+            blurRadius = 16f,
         )
     } else if (fillProgress >= 0.995f) {
         Shadow(
@@ -390,9 +441,9 @@ private fun WordKaraokeFillToken(
         style = TextStyle(
             fontFamily = PlusJakartaSansFamily,
             fontWeight = FontWeight.ExtraBold,
-            fontSize = 31.sp,
-            lineHeight = 40.sp,
-            letterSpacing = (-0.5).sp,
+            fontSize = 29.sp,
+            lineHeight = 37.sp,
+            letterSpacing = (-0.4).sp,
             brush = wordBrush,
             shadow = glowShadow,
         ),
@@ -414,7 +465,7 @@ private fun InstrumentalInterludeRow(
     val span = (line.endMs - line.startMs).coerceAtLeast(1L)
     val progress = ((currentMs - line.startMs).toFloat() / span.toFloat()).coerceIn(0f, 1f)
     val alpha by animateFloatAsState(
-        targetValue = if (isActive) 1f else 0.25f,
+        targetValue = if (isActive) 1f else 0.28f,
         animationSpec = spring(stiffness = 220f),
         label = "interludeAlpha",
     )
@@ -425,7 +476,7 @@ private fun InstrumentalInterludeRow(
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
             .clickable(onClick = onTap)
-            .padding(horizontal = 10.dp, vertical = 14.dp)
+            .padding(horizontal = 12.dp, vertical = 14.dp)
             .graphicsLayer { this.alpha = alpha },
     ) {
         Canvas(modifier = Modifier.width(64.dp).height(18.dp)) {
@@ -453,7 +504,7 @@ private fun InstrumentalInterludeRow(
         Text(
             text = stringResource(R.string.lyrics_instrumental_label),
             style = MaterialTheme.typography.labelMedium,
-            color = Color.White.copy(alpha = if (isActive) 0.76f else 0.35f),
+            color = Color.White.copy(alpha = if (isActive) 0.78f else 0.36f),
         )
     }
 }

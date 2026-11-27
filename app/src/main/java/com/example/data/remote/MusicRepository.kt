@@ -1,21 +1,56 @@
 package com.example.data.remote
 
 import android.util.Log
-import com.example.engine.LocalCadenceNeuralNet
 import com.example.engine.LrcParser
+import com.example.engine.ShazamSignatureGenerator
 import com.example.engine.WordPacingMlEngine
+import com.example.model.DevicePlayingTrack
 import com.example.model.LyricLine
 import com.example.model.SongCandidate
 import com.example.model.SyncedTrack
 import com.example.model.TimingSource
 import com.example.model.TrackMetadata
+import com.example.model.TranslationLanguage
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartBody
+import okhttp3.RequestBody.Companion.toRequestBody
+import java.net.URLEncoder
+import java.util.TimeZone
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.abs
+import kotlin.math.roundToLong
+import kotlin.math.sqrt
 
 private const val TAG = "MusicRepository"
+
+sealed interface ShazamRecognitionOutcome {
+    data class Matched(
+        val candidate: SongCandidate,
+        val sampleStartOffsetMs: Long,
+    ) : ShazamRecognitionOutcome
+
+    data class RetryNeeded(val retryMs: Long) : ShazamRecognitionOutcome
+    data object NoMatch : ShazamRecognitionOutcome
+    data class NetworkError(val message: String) : ShazamRecognitionOutcome
+}
+
+sealed interface AudioRecognitionOutcome {
+    data class Matched(
+        val candidate: SongCandidate,
+        val timecodeMs: Long,
+    ) : AudioRecognitionOutcome
+
+    data class QuotaExceeded(val message: String) : AudioRecognitionOutcome
+    data object NoMatch : AudioRecognitionOutcome
+    data class NetworkError(val message: String) : AudioRecognitionOutcome
+}
 
 private data class SongLead(
     val title: String,
@@ -26,13 +61,277 @@ private data class SongLead(
 )
 
 class MusicRepository(
+    private val shazamApi: ShazamDiscoveryApi = MusicApiFactory.shazam,
+    private val audDApi: AudDApi = MusicApiFactory.audD,
+    private val oEmbedApi: OEmbedApi = MusicApiFactory.oEmbed,
     private val lrcLibApi: LrcLibApi = MusicApiFactory.lrcLib,
     private val itunesApi: ItunesSearchApi = MusicApiFactory.itunes,
     private val deezerApi: DeezerApi = MusicApiFactory.deezer,
     private val geniusApi: GeniusPublicApi = MusicApiFactory.genius,
-    private val neuralNet: LocalCadenceNeuralNet = LocalCadenceNeuralNet(),
-    private val pacingEngine: WordPacingMlEngine = WordPacingMlEngine(neuralNet),
+    private val signatureGenerator: ShazamSignatureGenerator = ShazamSignatureGenerator(),
+    private val translationService: LyricsTranslationService = LyricsTranslationService(),
+    private val pacingEngine: WordPacingMlEngine = WordPacingMlEngine(),
 ) {
+
+    private val translationCache = ConcurrentHashMap<String, TranslatedLyricsResult>()
+
+    private val commonStopWords = setOf(
+        "the", "and", "you", "your", "that", "this", "with", "for", "are", "was",
+        "have", "not", "but", "all", "can", "just", "like", "know", "yeah", "ooh",
+        "oh", "ah", "na", "la", "to", "in", "of", "on", "it", "is", "be", "my", "me",
+    )
+
+    /**
+     * Free acoustic constellation fingerprinting against the open Shazam discovery v5 database.
+     * No API key or paid quota required; returns exact song title, artist, album art, and sample start offset.
+     */
+    suspend fun identifySongFromShazamSignature(
+        pcmSamples: ShortArray,
+        tagUuid: String,
+        sessionTimestampMs: Long,
+    ): ShazamRecognitionOutcome {
+        return try {
+            val signature = withContext(Dispatchers.Default) {
+                signatureGenerator.generateFromPcm16(pcmSamples)
+            }
+            if (signature.peakCount < 8) {
+                return ShazamRecognitionOutcome.NoMatch
+            }
+
+            val requestUuid = UUID.randomUUID().toString().uppercase()
+            val timezoneId = runCatching { TimeZone.getDefault().id }.getOrDefault("America/Chicago")
+            val payload = ShazamRequestDto(
+                signature = ShazamSignaturePayloadDto(
+                    samplems = signature.sampleDurationMs,
+                    timestamp = sessionTimestampMs,
+                    uri = signature.dataUri,
+                ),
+                timestamp = sessionTimestampMs,
+                timezone = timezoneId,
+            )
+
+            val response = shazamApi.recognizeSignature(
+                uuid1 = tagUuid.uppercase(),
+                uuid2 = requestUuid,
+                body = payload,
+            )
+
+            val track = response.track
+            val title = track?.title?.trim().orEmpty()
+            val artist = track?.subtitle?.trim().orEmpty()
+            if (title.isNotBlank() && artist.isNotBlank()) {
+                val offsetSec = response.matches.firstOrNull()?.offset ?: 0.0
+                val sampleStartOffsetMs = (offsetSec * 1_000.0).roundToLong().coerceAtLeast(0L)
+                val albumName = track?.sections
+                    ?.firstOrNull { it.type.equals("SONG", ignoreCase = true) }
+                    ?.metadata
+                    ?.firstOrNull { it.title.equals("Album", ignoreCase = true) }
+                    ?.text
+                    .orEmpty()
+                val shazamPlainLyrics = track?.sections
+                    ?.firstOrNull { it.type.equals("LYRICS", ignoreCase = true) }
+                    ?.text
+                    ?.joinToString("\n")
+                    ?.takeIf { it.isNotBlank() }
+                val artwork = track?.images?.coverarthq ?: track?.images?.coverart
+
+                val candidate = SongCandidate(
+                    metadata = TrackMetadata(
+                        id = "shazam_${track?.key ?: "${normalizeText(title).hashCode()}"}",
+                        title = title,
+                        artist = artist,
+                        album = albumName,
+                        durationMs = 0L,
+                        artworkUrl = artwork,
+                        sourceLabel = "Shazam Acoustic DB",
+                    ),
+                    syncedLyricsRaw = null,
+                    plainLyricsRaw = shazamPlainLyrics,
+                    matchedLineStartMs = sampleStartOffsetMs,
+                    matchScore = 1.0f,
+                )
+                return ShazamRecognitionOutcome.Matched(
+                    candidate = candidate,
+                    sampleStartOffsetMs = sampleStartOffsetMs,
+                )
+            }
+
+            val retry = response.retryms
+            if (retry != null && retry > 0L) {
+                ShazamRecognitionOutcome.RetryNeeded(retry)
+            } else {
+                ShazamRecognitionOutcome.NoMatch
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Shazam acoustic lookup failed", e)
+            ShazamRecognitionOutcome.NetworkError(e.localizedMessage ?: "Acoustic lookup failed")
+        }
+    }
+
+    /**
+     * Translates all vocal lyric lines of the active track with in-memory caching per (trackId, language).
+     */
+    suspend fun translateTrackLines(
+        trackId: String,
+        lines: List<LyricLine>,
+        targetLanguage: TranslationLanguage,
+    ): TranslatedLyricsResult? {
+        val cacheKey = "${trackId}|${targetLanguage.code}"
+        translationCache[cacheKey]?.let { return it }
+        val result = translationService.translateLines(lines, targetLanguage)
+        if (result != null && result.lineTranslations.isNotEmpty()) {
+            translationCache[cacheKey] = result
+        }
+        return result
+    }
+
+    /**
+     * Secondary acoustic audio fingerprinting via AudD API.
+     * Sends a recorded 16 kHz mono PCM16 WAV clip and receives exact song title,
+     * artist, album, and live playback timecode.
+     */
+    suspend fun identifySongFromAudioWav(
+        wavBytes: ByteArray,
+        apiToken: String,
+    ): AudioRecognitionOutcome {
+        return try {
+            val effectiveToken = apiToken.trim().ifBlank { "test" }
+            val tokenBody = effectiveToken.toRequestBody("text/plain".toMediaType())
+            val wavBody = wavBytes.toRequestBody("audio/wav".toMediaType())
+            val filePart = MultipartBody.Part.createFormData("file", "sample.wav", wavBody)
+
+            val response = audDApi.recognizeAudio(
+                apiToken = tokenBody,
+                file = filePart,
+            )
+
+            if (response.status.equals("error", ignoreCase = true)) {
+                val code = response.error?.errorCode ?: -1
+                val msg = response.error?.errorMessage.orEmpty()
+                if (code == 901 || code == 900 || msg.contains("limit", ignoreCase = true)) {
+                    return AudioRecognitionOutcome.QuotaExceeded(
+                        msg.ifBlank { "Shared AudD free recognition limit reached." },
+                    )
+                }
+                return AudioRecognitionOutcome.NetworkError(
+                    msg.ifBlank { "Recognition server error ($code)." },
+                )
+            }
+
+            val hit = response.result
+            val title = hit?.title?.trim().orEmpty()
+            val artist = hit?.artist?.trim().orEmpty()
+            if (title.isBlank() || artist.isBlank()) {
+                return AudioRecognitionOutcome.NoMatch
+            }
+
+            val timecodeMs = parseTimecodeToMs(hit?.timecode)
+            val candidate = SongCandidate(
+                metadata = TrackMetadata(
+                    id = "audd_${normalizeText(title).hashCode()}_${normalizeText(artist).hashCode()}",
+                    title = title,
+                    artist = artist,
+                    album = hit?.album?.trim().orEmpty(),
+                    durationMs = 0L,
+                    artworkUrl = null,
+                    sourceLabel = "AudD Audio Fingerprint",
+                ),
+                syncedLyricsRaw = null,
+                plainLyricsRaw = null,
+                matchedLineStartMs = timecodeMs,
+                matchScore = 1.0f,
+            )
+            AudioRecognitionOutcome.Matched(candidate = candidate, timecodeMs = timecodeMs)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "AudD audio recognition failed", e)
+            AudioRecognitionOutcome.NetworkError(e.localizedMessage ?: "Network request failed")
+        }
+    }
+
+    /**
+     * Resolves a track shared from another music app on the phone (Spotify, YouTube Music,
+     * Apple Music, SoundCloud, etc.) via public oEmbed metadata or clean text extraction.
+     */
+    suspend fun resolveSharedTextOrUrl(sharedText: String): SongCandidate? {
+        val raw = sharedText.trim()
+        if (raw.isBlank()) return null
+
+        val extractedUrl = Regex("https?://\\S+").find(raw)?.value?.trimEnd('.', ',', ')', ']')
+        var queryFromOEmbed: String? = null
+        var oEmbedArt: String? = null
+
+        if (extractedUrl != null) {
+            val encoded = URLEncoder.encode(extractedUrl, "UTF-8")
+            val oEmbedUrl = when {
+                extractedUrl.contains("spotify.com", ignoreCase = true) ->
+                    "https://open.spotify.com/oembed?url=$encoded"
+                extractedUrl.contains("youtube.com", ignoreCase = true) ||
+                    extractedUrl.contains("youtu.be", ignoreCase = true) ->
+                    "https://www.youtube.com/oembed?format=json&url=$encoded"
+                extractedUrl.contains("soundcloud.com", ignoreCase = true) ->
+                    "https://soundcloud.com/oembed?format=json&url=$encoded"
+                else -> null
+            }
+
+            if (oEmbedUrl != null) {
+                val dto = runCatching { oEmbedApi.fetchOEmbed(oEmbedUrl) }
+                    .onFailure { if (it is CancellationException) throw it }
+                    .getOrNull()
+                if (dto != null && !dto.title.isNullOrBlank()) {
+                    val cleanTitle = cleanSharedMediaTitle(dto.title)
+                    val cleanAuthor = dto.authorName
+                        ?.replace(Regex("\\s*-\\s*Topic$", RegexOption.IGNORE_CASE), "")
+                        ?.replace(Regex("\\s*VEVO$", RegexOption.IGNORE_CASE), "")
+                        ?.trim()
+                        .orEmpty()
+                    queryFromOEmbed = if (cleanAuthor.isNotBlank() &&
+                        !cleanTitle.contains(cleanAuthor, ignoreCase = true)
+                    ) {
+                        "$cleanTitle $cleanAuthor"
+                    } else {
+                        cleanTitle
+                    }
+                    oEmbedArt = dto.thumbnailUrl
+                }
+            }
+        }
+
+        val cleanedTextQuery = queryFromOEmbed ?: extractQueryFromPlainShare(raw, extractedUrl)
+        if (cleanedTextQuery.length < 2) return null
+
+        val candidates = searchRealTracks(cleanedTextQuery)
+        val best = candidates.firstOrNull { !it.syncedLyricsRaw.isNullOrBlank() }
+            ?: candidates.firstOrNull()
+        return best?.let { hit ->
+            if (hit.metadata.artworkUrl == null && oEmbedArt != null) {
+                hit.copy(metadata = hit.metadata.copy(artworkUrl = oEmbedArt))
+            } else {
+                hit
+            }
+        }
+    }
+
+    fun candidateFromDeviceTrack(deviceTrack: DevicePlayingTrack): SongCandidate {
+        return SongCandidate(
+            metadata = TrackMetadata(
+                id = "device_${normalizeText(deviceTrack.title).hashCode()}_${normalizeText(deviceTrack.artist).hashCode()}",
+                title = deviceTrack.title,
+                artist = deviceTrack.artist,
+                album = deviceTrack.album,
+                durationMs = deviceTrack.durationMs,
+                artworkUrl = null,
+                sourceLabel = deviceTrack.sourceApp,
+            ),
+            syncedLyricsRaw = null,
+            plainLyricsRaw = null,
+            matchedLineStartMs = deviceTrack.estimatedCurrentPositionMs(),
+            matchScore = 1.0f,
+        )
+    }
 
     /**
      * Live internet search combining LRCLIB synced lyrics, iTunes artwork, and Genius full-text lyric matches.
@@ -51,9 +350,7 @@ class MusicRepository(
                 .onFailure { if (it is CancellationException) throw it else Log.w(TAG, "iTunes search failed", it) }
                 .getOrDefault(emptyList())
         }
-        val geniusDeferred = async {
-            fetchGeniusLeads(cleanQuery)
-        }
+        val geniusDeferred = async { fetchGeniusLeads(cleanQuery) }
 
         val lrcRecords = lrcDeferred.await()
         val itunesTracks = itunesDeferred.await()
@@ -69,7 +366,7 @@ class MusicRepository(
         for (record in sortedLrc) {
             val title = record.trackName.orEmpty().trim()
             val artist = record.artistName.orEmpty().trim()
-            val dedupKey = "${neuralNet.normalizeLyrics(title)}|${neuralNet.normalizeLyrics(artist)}"
+            val dedupKey = "${normalizeText(title)}|${normalizeText(artist)}"
             if (!seenKeys.add(dedupKey)) continue
 
             val matchedItunes = findMatchingItunesTrack(title, artist, itunesTracks)
@@ -95,9 +392,8 @@ class MusicRepository(
             if (candidates.size >= 14) break
         }
 
-        // Include Genius full-text lyric hits (essential when user types a lyric line into Search!)
         for (lead in geniusLeads) {
-            val dedupKey = "${neuralNet.normalizeLyrics(lead.title)}|${neuralNet.normalizeLyrics(lead.artist)}"
+            val dedupKey = "${normalizeText(lead.title)}|${normalizeText(lead.artist)}"
             if (!seenKeys.add(dedupKey)) continue
             val matchedItunes = findMatchingItunesTrack(lead.title, lead.artist, itunesTracks)
             candidates += SongCandidate(
@@ -122,7 +418,7 @@ class MusicRepository(
                 val title = track.trackName.orEmpty().trim()
                 val artist = track.artistName.orEmpty().trim()
                 if (title.isBlank() || artist.isBlank()) continue
-                val dedupKey = "${neuralNet.normalizeLyrics(title)}|${neuralNet.normalizeLyrics(artist)}"
+                val dedupKey = "${normalizeText(title)}|${normalizeText(artist)}"
                 if (!seenKeys.add(dedupKey)) continue
 
                 candidates += SongCandidate(
@@ -147,18 +443,13 @@ class MusicRepository(
     }
 
     /**
-     * Robust multi-provider song identification from live microphone vocal phrases:
-     * 1. Searches full-text lyrics on Genius + metadata on iTunes & LRCLIB in parallel.
-     * 2. Fetches timestamped LRC lyrics from LRCLIB for top candidate songs.
-     * 3. Runs CadenceNet-Nano phonetic-lexical alignment across every line & 2-line window
-     *    to pick the exact real song and its current live timestamp.
+     * Secondary vocal lyric matching fallback when acoustic fingerprinting returns no match.
      */
     suspend fun identifySongFromVocalTranscript(transcript: String): SongCandidate? = coroutineScope {
-        val normalized = neuralNet.normalizeLyrics(transcript)
+        val normalized = normalizeText(transcript)
         val tokens = normalized.split(" ").filter { it.length >= 2 }
         if (tokens.size < 2) return@coroutineScope null
 
-        // Build focused search snippets (most recent 8 words + most distinctive 5-word window)
         val recentSnippet = tokens.takeLast(minOf(tokens.size, 8)).joinToString(" ")
         val shorterSnippet = if (tokens.size >= 6) {
             tokens.takeLast(5).joinToString(" ")
@@ -166,7 +457,6 @@ class MusicRepository(
             recentSnippet
         }
 
-        // Stage 1: Discover song candidates from full-text lyrics (Genius) + iTunes + LRCLIB in parallel
         val geniusPrimaryDeferred = async { fetchGeniusLeads(recentSnippet) }
         val geniusShortDeferred = async {
             if (shorterSnippet != recentSnippet) fetchGeniusLeads(shorterSnippet) else emptyList()
@@ -184,14 +474,14 @@ class MusicRepository(
 
         val leads = linkedMapOf<String, SongLead>()
         for (lead in geniusPrimaryDeferred.await() + geniusShortDeferred.await()) {
-            val key = "${neuralNet.normalizeLyrics(lead.title)}|${neuralNet.normalizeLyrics(lead.artist)}"
+            val key = "${normalizeText(lead.title)}|${normalizeText(lead.artist)}"
             if (key !in leads) leads[key] = lead
         }
         for (item in itunesDirectDeferred.await()) {
             val t = item.trackName?.trim().orEmpty()
             val a = item.artistName?.trim().orEmpty()
             if (t.isNotBlank() && a.isNotBlank()) {
-                val key = "${neuralNet.normalizeLyrics(t)}|${neuralNet.normalizeLyrics(a)}"
+                val key = "${normalizeText(t)}|${normalizeText(a)}"
                 if (key !in leads) {
                     leads[key] = SongLead(
                         title = t,
@@ -204,7 +494,6 @@ class MusicRepository(
             }
         }
 
-        // Stage 2: Fetch full synced LRC records from LRCLIB for the top 6 leads in parallel
         val fetchedRecords = mutableListOf<Pair<LrcLibRecord, SongLead?>>()
         lrcDirectDeferred.await().forEach { rec ->
             if (!rec.trackName.isNullOrBlank() && !rec.artistName.isNullOrBlank()) {
@@ -234,7 +523,6 @@ class MusicRepository(
 
         fetchedRecords += leadLrcResults
 
-        // Stage 3: Score every candidate's real timestamped lyrics with CadenceNet-Nano
         var bestCandidate: SongCandidate? = null
         var bestScore = 0f
         val seenIds = mutableSetOf<Long>()
@@ -264,8 +552,7 @@ class MusicRepository(
                 }
             }
 
-            // Title similarity bonus if the user sang or spoke the title hook
-            val titleBoost = neuralNet.scoreLyricAlignment(recentSnippet, title) * 0.12f
+            val titleBoost = scoreLyricMatch(recentSnippet, title) * 0.12f
             val originBoost = lead?.baseConfidence ?: 0f
             val totalScore = (lineScore + titleBoost + originBoost).coerceAtMost(1.25f)
 
@@ -279,7 +566,7 @@ class MusicRepository(
                         album = record.albumName.orEmpty().trim(),
                         durationMs = ((record.duration ?: 0.0) * 1000.0).toLong(),
                         artworkUrl = lead?.artworkUrl,
-                        sourceLabel = if (lead != null) "Genius · LRCLIB" else "LRCLIB Live Match",
+                        sourceLabel = if (lead != null) "Genius · LRCLIB" else "LRCLIB Vocal Match",
                     ),
                     syncedLyricsRaw = record.syncedLyrics,
                     plainLyricsRaw = record.plainLyrics,
@@ -289,7 +576,6 @@ class MusicRepository(
             }
         }
 
-        // If Genius found a strong full-text lyric hit but LRCLIB missed exact artist punctuation, return top Genius lead
         if (bestCandidate != null && bestScore >= 0.44f) {
             bestCandidate
         } else {
@@ -317,8 +603,8 @@ class MusicRepository(
     }
 
     /**
-     * Loads full high-res artwork (iTunes/Deezer), real track BPM (Deezer), and
-     * runs CadenceNet-Nano + WordPacingMlEngine to produce word-by-word timed lyrics.
+     * Loads real synced lyrics (LRCLIB), high-res cover art (iTunes/Deezer), and real BPM (Deezer),
+     * then runs WordPacingMlEngine to build word-by-word timed lyrics.
      */
     suspend fun loadFullSyncedTrack(
         candidate: SongCandidate,
@@ -328,20 +614,20 @@ class MusicRepository(
         val artist = candidate.metadata.artist
 
         val lyricsDeferred = async {
-            if (!candidate.syncedLyricsRaw.isNullOrBlank() || !candidate.plainLyricsRaw.isNullOrBlank()) {
+            if (!candidate.syncedLyricsRaw.isNullOrBlank()) {
                 candidate.syncedLyricsRaw to candidate.plainLyricsRaw
             } else {
                 val primaryArtist = artist.substringBefore(",").substringBefore("&").trim()
                 val fetched = runCatching {
-                    lrcLibApi.searchByFields(trackName = title, artistName = primaryArtist)
+                    lrcLibApi.searchByFields(trackName = title, artistName = primaryArtist.ifBlank { null })
                 }.onFailure { if (it is CancellationException) throw it }
                     .getOrDefault(emptyList())
                     .firstOrNull { !it.syncedLyrics.isNullOrBlank() }
-                    ?: runCatching { lrcLibApi.searchByQuery("$title $primaryArtist") }
+                    ?: runCatching { lrcLibApi.searchByQuery("$title $primaryArtist".trim()) }
                         .onFailure { if (it is CancellationException) throw it }
                         .getOrDefault(emptyList())
                         .firstOrNull { !it.syncedLyrics.isNullOrBlank() || !it.plainLyrics.isNullOrBlank() }
-                fetched?.syncedLyrics to fetched?.plainLyrics
+                fetched?.syncedLyrics to (fetched?.plainLyrics ?: candidate.plainLyricsRaw)
             }
         }
 
@@ -349,7 +635,7 @@ class MusicRepository(
             if (candidate.metadata.artworkUrl != null) {
                 null
             } else {
-                runCatching { itunesApi.searchTracks("$title $artist", limit = 5).results }
+                runCatching { itunesApi.searchTracks("$title $artist".trim(), limit = 5).results }
                     .onFailure { if (it is CancellationException) throw it }
                     .getOrDefault(emptyList())
                     .let { findMatchingItunesTrack(title, artist, it) }
@@ -358,9 +644,10 @@ class MusicRepository(
 
         val deezerDeferred = async {
             runCatching {
-                val search = deezerApi.searchTracks("track:\"$title\" artist:\"$artist\"", limit = 3)
+                val q = if (artist.isNotBlank()) "track:\"$title\" artist:\"$artist\"" else title
+                val search = deezerApi.searchTracks(q, limit = 3)
                 val firstId = search.data.firstOrNull()?.id
-                    ?: deezerApi.searchTracks("$title $artist", limit = 3).data.firstOrNull()?.id
+                    ?: deezerApi.searchTracks("$title $artist".trim(), limit = 3).data.firstOrNull()?.id
                 if (firstId != null) deezerApi.getTrackDetail(firstId) else null
             }.onFailure { if (it is CancellationException) throw it }
                 .getOrNull()
@@ -384,10 +671,17 @@ class MusicRepository(
             ?: 210_000L
 
         val sources = buildList {
+            if (candidate.metadata.sourceLabel.contains("Shazam", ignoreCase = true)) {
+                add("Shazam Acoustic DB")
+            } else if (candidate.metadata.sourceLabel.contains("AudD", ignoreCase = true)) {
+                add("AudD")
+            } else if (candidate.metadata.sourceLabel in setOf("Spotify", "Apple Music", "Samsung Music", "Poweramp", "Amazon Music", "Phone Player")) {
+                add(candidate.metadata.sourceLabel)
+            }
             add("LRCLIB")
             if (resolvedArtwork != null) add("iTunes")
             if (deezerBpm != null) add("Deezer BPM")
-        }.joinToString(" · ")
+        }.distinct().joinToString(" · ")
 
         val metadata = candidate.metadata.copy(
             artworkUrl = resolvedArtwork,
@@ -413,16 +707,14 @@ class MusicRepository(
         SyncedTrack(
             metadata = metadata,
             lines = synthesized?.lines.orEmpty(),
-            timingSource = synthesized?.timingSource ?: TimingSource.LOCAL_NEURAL_CADENCE_ENGINE,
+            timingSource = synthesized?.timingSource ?: TimingSource.PROSODIC_BEAT_ENGINE,
             engineConfidence = synthesized?.confidence ?: 0f,
             isSyncedAvailable = !syncedRaw.isNullOrBlank(),
         )
     }
 
     /**
-     * Matches a newly heard vocal snippet against the active track's lyric lines using
-     * CadenceNet-Nano (single-line and 2-line sliding windows with phonetic similarity)
-     * to snap playback to the real live position in the song.
+     * Deterministic phonetic & n-gram alignment to snap playback to a newly heard lyric phrase.
      */
     fun findBestRelockTimestamp(
         heardPhrase: String,
@@ -430,7 +722,7 @@ class MusicRepository(
         currentPositionMs: Long,
         preferProximity: Boolean = true,
     ): Pair<Long, Float>? {
-        val cleaned = neuralNet.normalizeLyrics(heardPhrase)
+        val cleaned = normalizeText(heardPhrase)
         val heardTokens = cleaned.split(" ").filter { it.length >= 2 }
         if (heardTokens.size < 2) return null
 
@@ -449,18 +741,16 @@ class MusicRepository(
                 0.5f
             }
 
-            val singleScore = neuralNet.scoreLyricAlignment(cleaned, line.rawText, proximity)
+            val singleScore = scoreLyricMatch(cleaned, line.rawText, proximity)
             if (singleScore > bestScore) {
                 bestScore = singleScore
-                // Estimate which word within the line corresponds to the end of the heard phrase
                 bestTimestampMs = estimatePhraseEndTimestamp(heardTokens, line)
             }
 
-            // Two-line sliding window in case the microphone captured across a line break
             if (i + 1 < vocalLines.size) {
                 val nextLine = vocalLines[i + 1]
                 val combined = "${line.rawText} ${nextLine.rawText}"
-                val combinedScore = neuralNet.scoreLyricAlignment(cleaned, combined, proximity)
+                val combinedScore = scoreLyricMatch(cleaned, combined, proximity)
                 if (combinedScore > bestScore) {
                     bestScore = combinedScore
                     bestTimestampMs = estimatePhraseEndTimestamp(heardTokens, nextLine)
@@ -475,11 +765,151 @@ class MusicRepository(
         }
     }
 
+    fun normalizeText(raw: String): String =
+        raw.lowercase()
+            .replace("'", "")
+            .replace("’", "")
+            .replace(Regex("[^a-z0-9\\s]"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+
+    fun phoneticKey(word: String): String {
+        val w = normalizeText(word).replace(" ", "")
+        if (w.length <= 2) return w
+        val mapped = w
+            .replace("ph", "f")
+            .replace("ck", "k")
+            .replace("qu", "k")
+            .replace("gh", "")
+            .replace("wh", "w")
+            .replace("kn", "n")
+            .replace("wr", "r")
+            .replace('c', 'k')
+            .replace('z', 's')
+            .replace('v', 'f')
+            .replace('d', 't')
+            .replace('p', 'b')
+            .replace('g', 'k')
+        val out = StringBuilder()
+        out.append(mapped.first())
+        for (i in 1 until mapped.length) {
+            val ch = mapped[i]
+            if (ch !in "aeiouyh" && ch != out.last()) {
+                out.append(ch)
+            }
+        }
+        return out.toString()
+    }
+
+    fun scoreLyricMatch(
+        heardRaw: String,
+        candidateRaw: String,
+        proximityBonus: Float = 0f,
+    ): Float {
+        val heard = normalizeText(heardRaw)
+        val cand = normalizeText(candidateRaw)
+        if (heard.length < 3 || cand.length < 3) return 0f
+        if (heard == cand) return 1f
+
+        val hWords = heard.split(" ").filter { it.length >= 2 }
+        val cWords = cand.split(" ").filter { it.length >= 2 }
+        if (hWords.isEmpty() || cWords.isEmpty()) return 0f
+
+        val cSet = cWords.toSet()
+        val cPhonSet = cWords.map { phoneticKey(it) }.toSet()
+
+        var totalWeight = 0f
+        var exactHit = 0f
+        var phonHit = 0f
+        for (w in hWords) {
+            val weight = if (w in commonStopWords) 0.45f else 1.25f
+            totalWeight += weight
+            if (w in cSet) {
+                exactHit += weight
+                phonHit += weight
+            } else if (phoneticKey(w) in cPhonSet) {
+                phonHit += weight * 0.88f
+            }
+        }
+
+        val exactRecall = (exactHit / totalWeight.coerceAtLeast(0.01f)).coerceIn(0f, 1f)
+        val phonRecall = (phonHit / totalWeight.coerceAtLeast(0.01f)).coerceIn(0f, 1f)
+
+        val hBigrams = hWords.zipWithNext { a, b -> "$a $b" }.toSet()
+        val cBigrams = cWords.zipWithNext { a, b -> "$a $b" }.toSet()
+        val bigramScore = if (hBigrams.isNotEmpty() && cBigrams.isNotEmpty()) {
+            hBigrams.count { it in cBigrams }.toFloat() / hBigrams.size.toFloat()
+        } else {
+            exactRecall
+        }
+
+        val trigramScore = charTrigramCosine(heard, cand)
+        val raw = (exactRecall * 0.36f) +
+            (phonRecall * 0.28f) +
+            (bigramScore * 0.16f) +
+            (trigramScore * 0.14f) +
+            (proximityBonus.coerceIn(0f, 1f) * 0.06f)
+        return raw.coerceIn(0f, 1f)
+    }
+
+    private fun charTrigramCosine(a: String, b: String): Float {
+        if (a.length < 3 || b.length < 3) return 0f
+        val mapA = HashMap<String, Int>()
+        val mapB = HashMap<String, Int>()
+        for (i in 0..a.length - 3) {
+            val g = a.substring(i, i + 3)
+            mapA[g] = (mapA[g] ?: 0) + 1
+        }
+        for (i in 0..b.length - 3) {
+            val g = b.substring(i, i + 3)
+            mapB[g] = (mapB[g] ?: 0) + 1
+        }
+        var dot = 0f
+        var magA = 0f
+        var magB = 0f
+        for ((k, v) in mapA) {
+            magA += v * v
+            val bv = mapB[k]
+            if (bv != null) dot += v * bv
+        }
+        for (v in mapB.values) magB += v * v
+        val denom = sqrt(magA) * sqrt(magB)
+        return if (denom > 0f) (dot / denom).coerceIn(0f, 1f) else 0f
+    }
+
+    private fun parseTimecodeToMs(timecode: String?): Long {
+        if (timecode.isNullOrBlank()) return 0L
+        val parts = timecode.trim().split(":").mapNotNull { it.toLongOrNull() }
+        return when (parts.size) {
+            2 -> (parts[0] * 60_000L) + (parts[1] * 1_000L)
+            3 -> (parts[0] * 3_600_000L) + (parts[1] * 60_000L) + (parts[2] * 1_000L)
+            else -> 0L
+        }
+    }
+
+    private fun cleanSharedMediaTitle(rawTitle: String): String =
+        rawTitle
+            .replace(Regex("\\s*\\((official|music|lyric|audio|hd|4k)[^)]*\\)", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("\\s*\\[(official|music|lyric|audio|hd|4k)[^]]*]", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("\\s*\\|\\s*.*$"), "")
+            .trim()
+
+    private fun extractQueryFromPlainShare(raw: String, url: String?): String {
+        val withoutUrl = if (url != null) raw.replace(url, " ") else raw
+        return withoutUrl
+            .replace(Regex("^(listen to|check out|playing|now playing)\\s+", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("\\s+on\\s+(apple music|spotify|youtube music|amazon music|deezer|tidal).*$", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("\\s+by\\s+", RegexOption.IGNORE_CASE), " ")
+            .replace(" - ", " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+    }
+
     private fun estimatePhraseEndTimestamp(heardTokens: List<String>, matchedLine: LyricLine): Long {
         if (matchedLine.words.isEmpty()) return matchedLine.endMs
-        val lastHeardPhon = neuralNet.phoneticSkeleton(heardTokens.last())
+        val lastHeardPhon = phoneticKey(heardTokens.last())
         val matchedWord = matchedLine.words.lastOrNull {
-            neuralNet.phoneticSkeleton(it.text) == lastHeardPhon
+            phoneticKey(it.text) == lastHeardPhon
         }
         return matchedWord?.endMs ?: matchedLine.endMs
     }
@@ -548,7 +978,7 @@ class MusicRepository(
             val lineText = lines[i].second
             if (lineText.isBlank()) continue
 
-            val singleScore = neuralNet.scoreLyricAlignment(heardNormalized, lineText)
+            val singleScore = scoreLyricMatch(heardNormalized, lineText)
             if (singleScore > bestScore) {
                 bestScore = singleScore
                 bestTimestamp = lines[i].first
@@ -556,10 +986,9 @@ class MusicRepository(
 
             if (i + 1 < lines.size) {
                 val combined = "$lineText ${lines[i + 1].second}"
-                val combinedScore = neuralNet.scoreLyricAlignment(heardNormalized, combined)
+                val combinedScore = scoreLyricMatch(heardNormalized, combined)
                 if (combinedScore > bestScore) {
                     bestScore = combinedScore
-                    // When matching across 2 lines, the end of the phrase is near line i+1 start
                     bestTimestamp = lines[i + 1].first
                 }
             }
@@ -572,15 +1001,15 @@ class MusicRepository(
         artist: String,
         itunesTracks: List<ItunesTrackDto>,
     ): ItunesTrackDto? {
-        val normTitle = neuralNet.normalizeLyrics(stripTitleDecorations(title))
-        val normArtist = neuralNet.normalizeLyrics(artist)
+        val normTitle = normalizeText(stripTitleDecorations(title))
+        val normArtist = normalizeText(artist)
         return itunesTracks.firstOrNull { dto ->
-            val dt = neuralNet.normalizeLyrics(dto.trackName.orEmpty())
-            val da = neuralNet.normalizeLyrics(dto.artistName.orEmpty())
+            val dt = normalizeText(dto.trackName.orEmpty())
+            val da = normalizeText(dto.artistName.orEmpty())
             (dt == normTitle || dt.contains(normTitle) || normTitle.contains(dt)) &&
-                (da == normArtist || da.contains(normArtist) || normArtist.contains(da))
+                (normArtist.isBlank() || da == normArtist || da.contains(normArtist) || normArtist.contains(da))
         } ?: itunesTracks.firstOrNull { dto ->
-            neuralNet.normalizeLyrics(dto.trackName.orEmpty()).contains(normTitle)
+            normalizeText(dto.trackName.orEmpty()).contains(normTitle)
         }
     }
 

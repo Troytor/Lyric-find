@@ -28,6 +28,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
@@ -43,8 +44,8 @@ import kotlin.math.cos
 import kotlin.math.sin
 
 /**
- * Interactive liquid glass microphone orb with concentric fluid rings and a
- * 16-band radial spectrum reacting in real time to live vocal audio.
+ * Interactive liquid glass microphone orb with concentric fluid rings, live capture
+ * progress arc, and a radial 16-band spectrum reacting in real time to microphone audio.
  */
 @Composable
 fun ListeningOrb(
@@ -54,8 +55,10 @@ fun ListeningOrb(
     palette: AmbientPalette,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    recordingProgress: Float = 0f,
 ) {
-    val isListening = micMode == MicMode.IDENTIFYING
+    val isRecording = micMode == MicMode.RECORDING_FINGERPRINT
+    val isListening = isRecording || micMode == MicMode.IDENTIFYING
     val isMatching = micMode == MicMode.MATCHING_ONLINE
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()
@@ -64,6 +67,11 @@ fun ListeningOrb(
         targetValue = if (isListening) amplitude.coerceIn(0f, 1f) else 0f,
         animationSpec = spring(dampingRatio = 0.65f, stiffness = 260f),
         label = "orbAmp",
+    )
+    val smoothProgress by animateFloatAsState(
+        targetValue = if (isRecording) recordingProgress.coerceIn(0f, 1f) else 0f,
+        animationSpec = tween(durationMillis = 120, easing = LinearEasing),
+        label = "orbProgress",
     )
     val pressScale by animateFloatAsState(
         targetValue = when {
@@ -117,7 +125,6 @@ fun ListeningOrb(
                     )
                 }
             } else {
-                // Calm ambient halo ring when idle
                 val subtle = (sin(breathe * 2.0 * PI).toFloat() * 0.5f) + 0.5f
                 drawCircle(
                     color = palette.highlightTint.copy(alpha = 0.14f + subtle * 0.12f),
@@ -127,7 +134,7 @@ fun ListeningOrb(
                 )
             }
 
-            // 16-bar radial harmonic visualizer around the glass orb
+            // 32-bar radial harmonic visualizer around the glass orb
             val barCount = 32
             for (i in 0 until barCount) {
                 val angle = spinAngle + (i.toFloat() / barCount) * (2.0 * PI).toFloat()
@@ -137,7 +144,7 @@ fun ListeningOrb(
                 } else {
                     (4.dp.toPx()) + (sin(angle * 3f + spinAngle * 2f) * 2.5.dp.toPx())
                 }
-                val startR = baseRadius * 1.07f
+                val startR = baseRadius * 1.09f
                 val endR = startR + barLen
                 val start = Offset(
                     x = center.x + cos(angle) * startR,
@@ -158,6 +165,39 @@ fun ListeningOrb(
                     end = end,
                     strokeWidth = 3.dp.toPx(),
                     cap = StrokeCap.Round,
+                )
+            }
+
+            // Luminous progress ring during the 5.5s audio fingerprint capture
+            if (isRecording && smoothProgress > 0.01f) {
+                val arcRadius = baseRadius * 1.03f
+                val arcSize = Size(arcRadius * 2f, arcRadius * 2f)
+                val topLeft = Offset(center.x - arcRadius, center.y - arcRadius)
+                drawArc(
+                    color = Color.White.copy(alpha = 0.16f),
+                    startAngle = -90f,
+                    sweepAngle = 360f,
+                    useCenter = false,
+                    topLeft = topLeft,
+                    size = arcSize,
+                    style = Stroke(width = 4.dp.toPx(), cap = StrokeCap.Round),
+                )
+                drawArc(
+                    brush = Brush.sweepGradient(
+                        colors = listOf(
+                            palette.highlightTint,
+                            Color.White,
+                            palette.primaryGlow,
+                            palette.highlightTint,
+                        ),
+                        center = center,
+                    ),
+                    startAngle = -90f,
+                    sweepAngle = 360f * smoothProgress,
+                    useCenter = false,
+                    topLeft = topLeft,
+                    size = arcSize,
+                    style = Stroke(width = 4.5.dp.toPx(), cap = StrokeCap.Round),
                 )
             }
 
@@ -212,7 +252,7 @@ fun ListeningOrb(
                 isListening -> {
                     Icon(
                         imageVector = Icons.Rounded.GraphicEq,
-                        contentDescription = "Listening for song vocals",
+                        contentDescription = "Listening to music",
                         tint = Color.White,
                         modifier = Modifier.size(52.dp),
                     )

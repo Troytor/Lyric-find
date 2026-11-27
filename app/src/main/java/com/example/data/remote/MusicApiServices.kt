@@ -2,13 +2,147 @@ package com.example.data.remote
 
 import com.squareup.moshi.Json
 import com.squareup.moshi.JsonClass
+import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
+import okhttp3.RequestBody
 import retrofit2.Retrofit
 import retrofit2.converter.moshi.MoshiConverterFactory
+import retrofit2.http.Body
 import retrofit2.http.GET
+import retrofit2.http.Multipart
+import retrofit2.http.POST
+import retrofit2.http.Part
 import retrofit2.http.Path
 import retrofit2.http.Query
+import retrofit2.http.Url
 import java.util.concurrent.TimeUnit
+
+@JsonClass(generateAdapter = true)
+data class ShazamGeoDto(
+    val altitude: Int = 300,
+    val latitude: Double = 45.0,
+    val longitude: Double = 2.0,
+)
+
+@JsonClass(generateAdapter = true)
+data class ShazamSignaturePayloadDto(
+    val samplems: Int,
+    val timestamp: Long,
+    val uri: String,
+)
+
+@JsonClass(generateAdapter = true)
+data class ShazamRequestDto(
+    val geolocation: ShazamGeoDto = ShazamGeoDto(),
+    val signature: ShazamSignaturePayloadDto,
+    val timestamp: Long,
+    val timezone: String = "America/Chicago",
+)
+
+@JsonClass(generateAdapter = true)
+data class ShazamDiscoveryResponseDto(
+    val matches: List<ShazamMatchDto> = emptyList(),
+    val track: ShazamTrackDto? = null,
+    val retryms: Long? = null,
+)
+
+@JsonClass(generateAdapter = true)
+data class ShazamMatchDto(
+    val id: String? = null,
+    val offset: Double? = null,
+    val timeskew: Double? = null,
+    val frequencyskew: Double? = null,
+)
+
+@JsonClass(generateAdapter = true)
+data class ShazamTrackDto(
+    val key: String? = null,
+    val title: String? = null,
+    val subtitle: String? = null,
+    val images: ShazamImagesDto? = null,
+    val sections: List<ShazamSectionDto> = emptyList(),
+)
+
+@JsonClass(generateAdapter = true)
+data class ShazamImagesDto(
+    val background: String? = null,
+    val coverart: String? = null,
+    val coverarthq: String? = null,
+)
+
+@JsonClass(generateAdapter = true)
+data class ShazamSectionDto(
+    val type: String? = null,
+    val text: List<String>? = null,
+    val metadata: List<ShazamMetadataItemDto>? = null,
+)
+
+@JsonClass(generateAdapter = true)
+data class ShazamMetadataItemDto(
+    val title: String? = null,
+    val text: String? = null,
+)
+
+interface ShazamDiscoveryApi {
+    @POST("discovery/v5/en-US/US/android/-/tag/{uuid1}/{uuid2}")
+    suspend fun recognizeSignature(
+        @Path("uuid1") uuid1: String,
+        @Path("uuid2") uuid2: String,
+        @Body body: ShazamRequestDto,
+        @Query("sync") sync: Boolean = true,
+        @Query("webv3") webv3: Boolean = true,
+        @Query("sampling") sampling: Boolean = true,
+        @Query("connected") connected: String = "",
+        @Query("shazamapiversion") shazamApiVersion: String = "v3",
+        @Query("sharehub") sharehub: Boolean = true,
+        @Query("hubv5minorversion") hubMinorVersion: String = "v5.1",
+        @Query("hidelb") hideLb: Boolean = true,
+        @Query("video") video: String = "v3",
+    ): ShazamDiscoveryResponseDto
+}
+
+@JsonClass(generateAdapter = true)
+data class AudDResponseDto(
+    val status: String? = null,
+    val result: AudDResultDto? = null,
+    val error: AudDErrorDto? = null,
+)
+
+@JsonClass(generateAdapter = true)
+data class AudDResultDto(
+    val artist: String? = null,
+    val title: String? = null,
+    val album: String? = null,
+    val timecode: String? = null,
+    @Json(name = "release_date") val releaseDate: String? = null,
+)
+
+@JsonClass(generateAdapter = true)
+data class AudDErrorDto(
+    @Json(name = "error_code") val errorCode: Int? = null,
+    @Json(name = "error_message") val errorMessage: String? = null,
+)
+
+interface AudDApi {
+    @Multipart
+    @POST("/")
+    suspend fun recognizeAudio(
+        @Part("api_token") apiToken: RequestBody,
+        @Part file: MultipartBody.Part,
+    ): AudDResponseDto
+}
+
+@JsonClass(generateAdapter = true)
+data class OEmbedResponseDto(
+    val title: String? = null,
+    @Json(name = "author_name") val authorName: String? = null,
+    @Json(name = "thumbnail_url") val thumbnailUrl: String? = null,
+)
+
+interface OEmbedApi {
+    @GET
+    suspend fun fetchOEmbed(@Url endpointUrl: String): OEmbedResponseDto
+}
 
 @JsonClass(generateAdapter = true)
 data class LrcLibRecord(
@@ -107,7 +241,6 @@ interface DeezerApi {
     suspend fun getTrackDetail(@Path("id") trackId: Long): DeezerTrackDetailDto
 }
 
-// Public full-text lyric search endpoints (returns song title & artist from sung lyric snippets)
 @JsonClass(generateAdapter = true)
 data class GeniusPublicSearchResponse(
     val response: GeniusSectionsBody? = null,
@@ -166,7 +299,23 @@ object MusicApiFactory {
             .addInterceptor { chain ->
                 val request = chain.request()
                     .newBuilder()
-                    .header("User-Agent", "CadenceAndroid/1.1 (https://cadence.local)")
+                    .header("User-Agent", "CadenceAndroid/1.2 (https://cadence.local)")
+                    .header("Accept", "application/json")
+                    .build()
+                chain.proceed(request)
+            }
+            .build()
+    }
+
+    private val audDClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(12, TimeUnit.SECONDS)
+            .writeTimeout(20, TimeUnit.SECONDS)
+            .readTimeout(24, TimeUnit.SECONDS)
+            .addInterceptor { chain ->
+                val request = chain.request()
+                    .newBuilder()
+                    .header("User-Agent", "CadenceAndroid/1.2")
                     .header("Accept", "application/json")
                     .build()
                 chain.proceed(request)
@@ -191,6 +340,52 @@ object MusicApiFactory {
                 chain.proceed(request)
             }
             .build()
+    }
+
+    private val shazamClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(12, TimeUnit.SECONDS)
+            .readTimeout(18, TimeUnit.SECONDS)
+            .addInterceptor { chain ->
+                val request = chain.request()
+                    .newBuilder()
+                    .header(
+                        "User-Agent",
+                        "Dalvik/2.1.0 (Linux; U; Android 14; Pixel 8 Build/UQ1A.240205.002)",
+                    )
+                    .header("Content-Language", "en_US")
+                    .header("Accept", "application/json")
+                    .build()
+                chain.proceed(request)
+            }
+            .build()
+    }
+
+    val shazam: ShazamDiscoveryApi by lazy {
+        Retrofit.Builder()
+            .baseUrl("https://amp.shazam.com/")
+            .client(shazamClient)
+            .addConverterFactory(MoshiConverterFactory.create())
+            .build()
+            .create(ShazamDiscoveryApi::class.java)
+    }
+
+    val audD: AudDApi by lazy {
+        Retrofit.Builder()
+            .baseUrl("https://api.audd.io/")
+            .client(audDClient)
+            .addConverterFactory(MoshiConverterFactory.create())
+            .build()
+            .create(AudDApi::class.java)
+    }
+
+    val oEmbed: OEmbedApi by lazy {
+        Retrofit.Builder()
+            .baseUrl("https://open.spotify.com/")
+            .client(sharedClient)
+            .addConverterFactory(MoshiConverterFactory.create())
+            .build()
+            .create(OEmbedApi::class.java)
     }
 
     val lrcLib: LrcLibApi by lazy {

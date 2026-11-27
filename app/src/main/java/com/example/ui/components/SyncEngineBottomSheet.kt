@@ -12,13 +12,21 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -45,13 +53,16 @@ fun SyncEngineBottomSheet(
     telemetry: AudioTelemetry,
     syncOffsetMs: Long,
     isMicSyncEnabled: Boolean,
-    cloudNotice: String,
+    engineNotice: String,
+    customAudDToken: String,
     palette: AmbientPalette,
     onAdjustOffset: (Long) -> Unit,
     onResetOffset: () -> Unit,
+    onSaveAudDToken: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var tokenInput by remember(customAudDToken) { mutableStateOf(customAudDToken) }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -64,6 +75,7 @@ fun SyncEngineBottomSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
                 .navigationBarsPadding()
                 .padding(horizontal = 24.dp)
                 .padding(bottom = 28.dp),
@@ -169,20 +181,20 @@ fun SyncEngineBottomSheet(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // Local CadenceNet-Nano neural inference telemetry row
+            // Real-time DSP signal telemetry row
             Row(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 MetricGlassTile(
-                    label = stringResource(R.string.engine_neural_vocal),
-                    value = if (isMicSyncEnabled) "${(telemetry.neuralVocalProb * 100f).roundToInt()}%" else "—",
+                    label = stringResource(R.string.engine_vocal_band),
+                    value = if (isMicSyncEnabled) "${(telemetry.vocalEnergy * 100f).roundToInt()}%" else "—",
                     accent = palette.highlightTint,
                     modifier = Modifier.weight(1f),
                 )
                 MetricGlassTile(
-                    label = stringResource(R.string.engine_neural_beat),
-                    value = if (isMicSyncEnabled) "${(telemetry.neuralBeatProb * 100f).roundToInt()}%" else "—",
+                    label = stringResource(R.string.engine_bass_energy),
+                    value = if (isMicSyncEnabled) "${(telemetry.bassEnergy * 100f).roundToInt()}%" else "—",
                     accent = Color.White,
                     modifier = Modifier.weight(1f),
                 )
@@ -240,10 +252,10 @@ fun SyncEngineBottomSheet(
 
             Spacer(modifier = Modifier.height(18.dp))
 
-            // Word pacing engine source info
+            // Word pacing & DSP source info
             val sourceLabel = when (track.timingSource) {
                 TimingSource.ENHANCED_LRC -> stringResource(R.string.engine_source_enhanced)
-                TimingSource.LOCAL_NEURAL_CADENCE_ENGINE -> stringResource(R.string.engine_source_ml)
+                TimingSource.PROSODIC_BEAT_ENGINE -> stringResource(R.string.engine_source_prosodic)
                 TimingSource.PLAIN_ESTIMATED -> stringResource(R.string.engine_source_plain)
             }
             Box(
@@ -267,9 +279,63 @@ fun SyncEngineBottomSheet(
                     )
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = cloudNotice.ifBlank { stringResource(R.string.engine_firebase_notice) },
+                        text = engineNotice.ifBlank { stringResource(R.string.engine_dsp_notice) },
                         style = MaterialTheme.typography.bodyMedium,
                         color = Color.White.copy(alpha = 0.62f),
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Optional personal AudD API token for unlimited audio fingerprinting
+            Text(
+                text = stringResource(R.string.engine_audd_token_title),
+                style = MaterialTheme.typography.labelLarge,
+                color = Color.White.copy(alpha = 0.84f),
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                OutlinedTextField(
+                    value = tokenInput,
+                    onValueChange = { tokenInput = it },
+                    singleLine = true,
+                    placeholder = {
+                        Text(
+                            text = stringResource(R.string.engine_audd_token_placeholder),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.White.copy(alpha = 0.45f),
+                        )
+                    },
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White,
+                        focusedBorderColor = palette.highlightTint,
+                        unfocusedBorderColor = Color.White.copy(alpha = 0.24f),
+                        cursorColor = palette.highlightTint,
+                    ),
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("audd_token_input"),
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                LiquidGlassPillButton(
+                    onClick = { onSaveAudDToken(tokenInput) },
+                    isActive = true,
+                    accentColor = palette.highlightTint,
+                    modifier = Modifier
+                        .height(52.dp)
+                        .testTag("save_audd_token_button"),
+                ) {
+                    Text(
+                        text = stringResource(R.string.engine_audd_token_save),
+                        style = MaterialTheme.typography.labelLarge,
+                        color = Color.White,
+                        modifier = Modifier.padding(horizontal = 16.dp),
                     )
                 }
             }

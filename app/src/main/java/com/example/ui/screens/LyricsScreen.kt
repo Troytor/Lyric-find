@@ -2,6 +2,7 @@ package com.example.ui.screens
 
 import android.graphics.Bitmap
 import android.graphics.drawable.BitmapDrawable
+import android.os.SystemClock
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
@@ -9,6 +10,7 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -38,11 +40,23 @@ import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Translate
 import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -65,6 +79,7 @@ import com.example.ui.components.LiquidGlassSurface
 import com.example.ui.components.WordSyncedLyricsView
 import com.example.viewmodel.CadenceUiState
 import kotlin.math.roundToInt
+import kotlin.math.roundToLong
 
 @Composable
 fun LyricsScreen(
@@ -77,6 +92,8 @@ fun LyricsScreen(
     onTogglePlayPause: () -> Unit,
     onToggleBeatSync: () -> Unit,
     onRelockLine: () -> Unit,
+    onOpenTranslation: () -> Unit,
+    onQuickNudgeOffset: (Long) -> Unit,
     onOpenCalibration: () -> Unit,
     onSeekToMs: (Long) -> Unit,
     onArtworkBitmapLoaded: (Bitmap) -> Unit,
@@ -102,6 +119,8 @@ fun LyricsScreen(
                 onTogglePlayPause = onTogglePlayPause,
                 onToggleBeatSync = onToggleBeatSync,
                 onRelockLine = onRelockLine,
+                onOpenTranslation = onOpenTranslation,
+                onQuickNudgeOffset = onQuickNudgeOffset,
                 onOpenCalibration = onOpenCalibration,
                 onSeekToMs = onSeekToMs,
                 onArtworkBitmapLoaded = onArtworkBitmapLoaded,
@@ -117,6 +136,8 @@ fun LyricsScreen(
                 onTogglePlayPause = onTogglePlayPause,
                 onToggleBeatSync = onToggleBeatSync,
                 onRelockLine = onRelockLine,
+                onOpenTranslation = onOpenTranslation,
+                onQuickNudgeOffset = onQuickNudgeOffset,
                 onOpenCalibration = onOpenCalibration,
                 onSeekToMs = onSeekToMs,
                 onArtworkBitmapLoaded = onArtworkBitmapLoaded,
@@ -136,12 +157,14 @@ private fun CompactPhoneLyricsLayout(
     onTogglePlayPause: () -> Unit,
     onToggleBeatSync: () -> Unit,
     onRelockLine: () -> Unit,
+    onOpenTranslation: () -> Unit,
+    onQuickNudgeOffset: (Long) -> Unit,
     onOpenCalibration: () -> Unit,
     onSeekToMs: (Long) -> Unit,
     onArtworkBitmapLoaded: (Bitmap) -> Unit,
 ) {
     Box(modifier = Modifier.fillMaxSize()) {
-        // Full-bleed word-by-word synced lyrics canvas
+        // Full-bleed Musixmatch-style word-by-word synced lyrics + dual-line translations
         WordSyncedLyricsView(
             lines = track.lines,
             clockAnchor = uiState.clockAnchor,
@@ -150,11 +173,13 @@ private fun CompactPhoneLyricsLayout(
             highlightTint = uiState.ambientPalette.highlightTint,
             topContentPadding = PaddingValues(
                 top = 112.dp,
-                bottom = 172.dp,
-                start = 20.dp,
-                end = 20.dp,
+                bottom = 220.dp,
+                start = 18.dp,
+                end = 18.dp,
             ),
             onLineTap = onSeekToMs,
+            isTranslationEnabled = uiState.isTranslationEnabled,
+            translatedLines = uiState.translatedLines,
         )
 
         // Floating top liquid glass Now Playing bar
@@ -163,6 +188,7 @@ private fun CompactPhoneLyricsLayout(
             liveBpm = uiState.telemetry.detectedBpm,
             beatIntensity = uiState.telemetry.beatIntensity,
             isMicSyncEnabled = uiState.isMicSyncEnabled,
+            isDeviceBroadcastSynced = uiState.isDeviceBroadcastSynced,
             highlightTint = uiState.ambientPalette.highlightTint,
             onBack = onBack,
             onOpenSearch = onOpenSearch,
@@ -172,7 +198,7 @@ private fun CompactPhoneLyricsLayout(
                 .padding(horizontal = 16.dp, vertical = 10.dp),
         )
 
-        // Live re-locking transcript pill or room-silence indicator above dock
+        // Live re-syncing pill or room-silence indicator above dock
         val showStatusPill = uiState.micMode == MicMode.RELOCKING_LINE || uiState.autoPausedBySilence
         AnimatedVisibility(
             visible = showStatusPill,
@@ -181,7 +207,7 @@ private fun CompactPhoneLyricsLayout(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .navigationBarsPadding()
-                .padding(bottom = 96.dp, start = 24.dp, end = 24.dp),
+                .padding(bottom = 168.dp, start = 24.dp, end = 24.dp),
         ) {
             LiquidGlassSurface(
                 shape = RoundedCornerShape(50),
@@ -216,19 +242,23 @@ private fun CompactPhoneLyricsLayout(
             }
         }
 
-        // Floating bottom liquid glass transport & mic-sync dock
+        // Unified floating Musixmatch-style live timeline + transport + translate console
         FloatingLyricsControlDock(
             uiState = uiState,
+            track = track,
             hasMicPermission = hasMicPermission,
             onRequestMicPermission = onRequestMicPermission,
             onTogglePlayPause = onTogglePlayPause,
             onToggleBeatSync = onToggleBeatSync,
             onRelockLine = onRelockLine,
+            onOpenTranslation = onOpenTranslation,
+            onQuickNudgeOffset = onQuickNudgeOffset,
             onOpenCalibration = onOpenCalibration,
+            onSeekToMs = onSeekToMs,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .navigationBarsPadding()
-                .padding(horizontal = 16.dp, vertical = 14.dp),
+                .padding(horizontal = 14.dp, vertical = 12.dp),
         )
     }
 }
@@ -244,6 +274,8 @@ private fun ExpandedTwoPaneLyricsLayout(
     onTogglePlayPause: () -> Unit,
     onToggleBeatSync: () -> Unit,
     onRelockLine: () -> Unit,
+    onOpenTranslation: () -> Unit,
+    onQuickNudgeOffset: (Long) -> Unit,
     onOpenCalibration: () -> Unit,
     onSeekToMs: (Long) -> Unit,
     onArtworkBitmapLoaded: (Bitmap) -> Unit,
@@ -255,7 +287,7 @@ private fun ExpandedTwoPaneLyricsLayout(
             .padding(horizontal = 28.dp, vertical = 18.dp),
         horizontalArrangement = Arrangement.spacedBy(32.dp),
     ) {
-        // Left canonical pane: large album artwork, metadata, live beat badge, control dock
+        // Left canonical pane: artwork, metadata, live scrubber, controls
         Column(
             verticalArrangement = Arrangement.SpaceBetween,
             modifier = Modifier
@@ -291,7 +323,7 @@ private fun ExpandedTwoPaneLyricsLayout(
                     fillAlpha = 0.28f,
                     highlightAlpha = 0.34f,
                     modifier = Modifier
-                        .fillMaxWidth(0.84f)
+                        .fillMaxWidth(0.76f)
                         .aspectRatio(1f),
                 ) {
                     TrackArtworkImage(
@@ -302,7 +334,7 @@ private fun ExpandedTwoPaneLyricsLayout(
                     )
                 }
 
-                Spacer(modifier = Modifier.height(20.dp))
+                Spacer(modifier = Modifier.height(18.dp))
 
                 Text(
                     text = track.metadata.title,
@@ -323,17 +355,21 @@ private fun ExpandedTwoPaneLyricsLayout(
 
             FloatingLyricsControlDock(
                 uiState = uiState,
+                track = track,
                 hasMicPermission = hasMicPermission,
                 onRequestMicPermission = onRequestMicPermission,
                 onTogglePlayPause = onTogglePlayPause,
                 onToggleBeatSync = onToggleBeatSync,
                 onRelockLine = onRelockLine,
+                onOpenTranslation = onOpenTranslation,
+                onQuickNudgeOffset = onQuickNudgeOffset,
                 onOpenCalibration = onOpenCalibration,
+                onSeekToMs = onSeekToMs,
                 modifier = Modifier.fillMaxWidth(),
             )
         }
 
-        // Right canonical pane: full-height word-synced lyrics
+        // Right canonical pane: full-height synced lyrics + translations
         WordSyncedLyricsView(
             lines = track.lines,
             clockAnchor = uiState.clockAnchor,
@@ -342,6 +378,8 @@ private fun ExpandedTwoPaneLyricsLayout(
             highlightTint = uiState.ambientPalette.highlightTint,
             topContentPadding = PaddingValues(top = 64.dp, bottom = 120.dp, start = 12.dp, end = 12.dp),
             onLineTap = onSeekToMs,
+            isTranslationEnabled = uiState.isTranslationEnabled,
+            translatedLines = uiState.translatedLines,
             modifier = Modifier
                 .weight(0.58f)
                 .fillMaxHeight(),
@@ -355,6 +393,7 @@ private fun TopTrackGlassBar(
     liveBpm: Float?,
     beatIntensity: Float,
     isMicSyncEnabled: Boolean,
+    isDeviceBroadcastSynced: Boolean,
     highlightTint: Color,
     onBack: () -> Unit,
     onOpenSearch: () -> Unit,
@@ -369,7 +408,7 @@ private fun TopTrackGlassBar(
 
     LiquidGlassSurface(
         shape = RoundedCornerShape(28.dp),
-        fillAlpha = 0.46f,
+        fillAlpha = 0.48f,
         highlightAlpha = 0.28f,
         modifier = modifier.fillMaxWidth(),
     ) {
@@ -427,7 +466,7 @@ private fun TopTrackGlassBar(
                         modifier = Modifier.weight(1f, fill = false),
                     )
                     val displayBpm = liveBpm ?: track.metadata.bpm
-                    if (displayBpm != null || isMicSyncEnabled) {
+                    if (displayBpm != null || isMicSyncEnabled || isDeviceBroadcastSynced) {
                         Spacer(modifier = Modifier.width(8.dp))
                         Box(
                             modifier = Modifier
@@ -437,16 +476,26 @@ private fun TopTrackGlassBar(
                                     scaleY = beatDotScale
                                 }
                                 .clip(CircleShape)
-                                .background(if (isMicSyncEnabled) highlightTint else Color.White.copy(alpha = 0.4f)),
+                                .background(
+                                    if (isMicSyncEnabled || isDeviceBroadcastSynced) {
+                                        highlightTint
+                                    } else {
+                                        Color.White.copy(alpha = 0.4f)
+                                    },
+                                ),
                         )
-                        if (displayBpm != null) {
-                            Spacer(modifier = Modifier.width(5.dp))
-                            Text(
-                                text = "${displayBpm.roundToInt()} BPM",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = highlightTint,
-                            )
+                        Spacer(modifier = Modifier.width(5.dp))
+                        val badgeLabel = when {
+                            isDeviceBroadcastSynced -> "PHONE SYNC"
+                            displayBpm != null -> "${displayBpm.roundToInt()} BPM"
+                            else -> "SYNC"
                         }
+                        Text(
+                            text = badgeLabel,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = highlightTint,
+                            maxLines = 1,
+                        )
                     }
                 }
             }
@@ -471,59 +520,157 @@ private fun TopTrackGlassBar(
 @Composable
 private fun FloatingLyricsControlDock(
     uiState: CadenceUiState,
+    track: SyncedTrack,
     hasMicPermission: Boolean,
     onRequestMicPermission: () -> Unit,
     onTogglePlayPause: () -> Unit,
     onToggleBeatSync: () -> Unit,
     onRelockLine: () -> Unit,
+    onOpenTranslation: () -> Unit,
+    onQuickNudgeOffset: (Long) -> Unit,
     onOpenCalibration: () -> Unit,
+    onSeekToMs: (Long) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val accent = uiState.ambientPalette.highlightTint
     val isRelocking = uiState.micMode == MicMode.RELOCKING_LINE
+    val durationMs = track.metadata.durationMs.coerceAtLeast(1_000L)
+
+    // Smooth real-time position for Musixmatch-style live timeline scrubber
+    var livePosMs by remember(uiState.clockAnchor, uiState.syncOffsetMs) {
+        mutableLongStateOf((uiState.clockAnchor.currentPositionMs() + uiState.syncOffsetMs).coerceIn(0L, durationMs))
+    }
+    var isDraggingSlider by remember { mutableStateOf(false) }
+    var dragFraction by remember { mutableFloatStateOf(0f) }
+
+    LaunchedEffect(uiState.clockAnchor, uiState.syncOffsetMs, durationMs) {
+        if (!uiState.clockAnchor.isRunning) {
+            livePosMs = (uiState.clockAnchor.basePositionMs + uiState.syncOffsetMs).coerceIn(0L, durationMs)
+            return@LaunchedEffect
+        }
+        while (true) {
+            withFrameNanos {
+                val now = SystemClock.elapsedRealtimeNanos()
+                livePosMs = (uiState.clockAnchor.currentPositionMs(now) + uiState.syncOffsetMs)
+                    .coerceIn(0L, durationMs)
+            }
+        }
+    }
+
+    val sliderValue = if (isDraggingSlider) {
+        dragFraction
+    } else {
+        (livePosMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
+    }
+    val displayedMs = if (isDraggingSlider) (dragFraction * durationMs).roundToLong() else livePosMs
 
     LiquidGlassSurface(
-        shape = RoundedCornerShape(34.dp),
-        fillAlpha = 0.50f,
+        shape = RoundedCornerShape(30.dp),
+        fillAlpha = 0.54f,
         highlightAlpha = 0.30f,
-        modifier = modifier,
+        modifier = modifier.fillMaxWidth(),
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 10.dp),
         ) {
-            // Play / Pause live lyrics clock
-            LiquidGlassIconButton(
-                onClick = onTogglePlayPause,
-                isActive = uiState.clockAnchor.isRunning,
-                accentColor = accent,
-                modifier = Modifier.testTag("lyrics_play_pause_button"),
+            // Top timeline row: Live timestamp + Musixmatch quick -0.2s / +0.2s sync nudge chips
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier.fillMaxWidth(),
             ) {
-                Icon(
-                    imageVector = if (uiState.clockAnchor.isRunning) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                    contentDescription = if (uiState.clockAnchor.isRunning) {
-                        stringResource(R.string.lyrics_pause_cd)
-                    } else {
-                        stringResource(R.string.lyrics_play_cd)
-                    },
-                    tint = Color.White,
-                    modifier = Modifier.size(24.dp),
+                Text(
+                    text = "${formatDurationMs(displayedMs)} / ${formatDurationMs(durationMs)}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color.White.copy(alpha = 0.80f),
                 )
-            }
 
-            // Live Microphone Beat-Sync toggle pill
-            LiquidGlassPillButton(
-                onClick = {
-                    if (hasMicPermission) onToggleBeatSync() else onRequestMicPermission()
-                },
-                isActive = uiState.isMicSyncEnabled && hasMicPermission,
-                accentColor = accent,
-                modifier = Modifier.testTag("lyrics_mic_sync_toggle"),
-            ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    QuickNudgeChip(
+                        label = stringResource(R.string.lyrics_nudge_earlier),
+                        onClick = { onQuickNudgeOffset(-200L) },
+                        modifier = Modifier.testTag("quick_nudge_minus"),
+                    )
+                    if (uiState.syncOffsetMs != 0L) {
+                        val sec = uiState.syncOffsetMs / 1000f
+                        val sign = if (sec > 0f) "+" else ""
+                        Text(
+                            text = String.format("%s%.1fs", sign, sec),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = accent,
+                        )
+                    }
+                    QuickNudgeChip(
+                        label = stringResource(R.string.lyrics_nudge_later),
+                        onClick = { onQuickNudgeOffset(200L) },
+                        modifier = Modifier.testTag("quick_nudge_plus"),
+                    )
+                }
+            }
+
+            // Interactive live progress scrubber bar
+            Slider(
+                value = sliderValue,
+                onValueChange = { frac ->
+                    isDraggingSlider = true
+                    dragFraction = frac
+                },
+                onValueChangeFinished = {
+                    val targetMs = (dragFraction * durationMs).roundToLong()
+                    isDraggingSlider = false
+                    onSeekToMs(targetMs)
+                },
+                colors = SliderDefaults.colors(
+                    thumbColor = Color.White,
+                    activeTrackColor = accent,
+                    inactiveTrackColor = Color.White.copy(alpha = 0.22f),
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(28.dp)
+                    .testTag("lyrics_timeline_slider"),
+            )
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            // Primary action row: Play/Pause, Mic Beat-Sync, Re-sync Audio, Translate, Calibration
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                // Play / Pause live lyrics clock
+                LiquidGlassIconButton(
+                    onClick = onTogglePlayPause,
+                    isActive = uiState.clockAnchor.isRunning,
+                    accentColor = accent,
+                    modifier = Modifier.testTag("lyrics_play_pause_button"),
+                ) {
+                    Icon(
+                        imageVector = if (uiState.clockAnchor.isRunning) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                        contentDescription = if (uiState.clockAnchor.isRunning) {
+                            stringResource(R.string.lyrics_pause_cd)
+                        } else {
+                            stringResource(R.string.lyrics_play_cd)
+                        },
+                        tint = Color.White,
+                        modifier = Modifier.size(24.dp),
+                    )
+                }
+
+                // Live Microphone Beat-Sync toggle
+                LiquidGlassIconButton(
+                    onClick = {
+                        if (hasMicPermission) onToggleBeatSync() else onRequestMicPermission()
+                    },
+                    isActive = uiState.isMicSyncEnabled && hasMicPermission,
+                    accentColor = accent,
+                    modifier = Modifier.testTag("lyrics_mic_sync_toggle"),
                 ) {
                     Icon(
                         imageVector = if (uiState.isMicSyncEnabled && hasMicPermission) {
@@ -531,65 +678,128 @@ private fun FloatingLyricsControlDock(
                         } else {
                             Icons.Rounded.MicOff
                         },
-                        contentDescription = null,
-                        tint = Color.White,
-                        modifier = Modifier.size(18.dp),
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = if (uiState.isMicSyncEnabled && hasMicPermission) {
+                        contentDescription = if (uiState.isMicSyncEnabled && hasMicPermission) {
                             stringResource(R.string.lyrics_mic_sync_on)
                         } else {
                             stringResource(R.string.lyrics_mic_sync_off)
                         },
-                        style = MaterialTheme.typography.labelLarge,
-                        color = Color.White,
+                        tint = Color.White,
+                        modifier = Modifier.size(21.dp),
                     )
                 }
-            }
 
-            // Momentary vocal re-lock pill (hears current sung line and snaps clock)
-            LiquidGlassPillButton(
-                onClick = {
-                    if (hasMicPermission) onRelockLine() else onRequestMicPermission()
-                },
-                isActive = isRelocking,
-                accentColor = accent,
-                modifier = Modifier.testTag("lyrics_relock_button"),
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                // Instant acoustic re-sync pill (re-anchors lyrics to exact live second)
+                LiquidGlassPillButton(
+                    onClick = {
+                        if (hasMicPermission) onRelockLine() else onRequestMicPermission()
+                    },
+                    isActive = isRelocking,
+                    accentColor = accent,
+                    modifier = Modifier.testTag("lyrics_relock_button"),
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Hearing,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = stringResource(R.string.lyrics_relock_vocals),
+                            style = MaterialTheme.typography.labelLarge,
+                            color = Color.White,
+                            maxLines = 1,
+                        )
+                    }
+                }
+
+                // Musixmatch-style Translation toggle & language picker button
+                LiquidGlassPillButton(
+                    onClick = onOpenTranslation,
+                    isActive = uiState.isTranslationEnabled,
+                    accentColor = accent,
+                    modifier = Modifier.testTag("lyrics_translate_button"),
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                    ) {
+                        if (uiState.isTranslating) {
+                            CircularProgressIndicator(
+                                color = Color.White,
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(16.dp),
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Rounded.Translate,
+                                contentDescription = stringResource(R.string.lyrics_translate_cd),
+                                tint = Color.White,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (uiState.isTranslationEnabled) {
+                                uiState.selectedTranslationLang.code.substringBefore("-").uppercase()
+                            } else {
+                                stringResource(R.string.lyrics_translate_label)
+                            },
+                            style = MaterialTheme.typography.labelLarge,
+                            color = Color.White,
+                            maxLines = 1,
+                        )
+                    }
+                }
+
+                // Acoustic Sync Calibration & Spectrum Sheet button
+                LiquidGlassIconButton(
+                    onClick = onOpenCalibration,
+                    modifier = Modifier.testTag("lyrics_calibration_button"),
                 ) {
                     Icon(
-                        imageVector = Icons.Rounded.Hearing,
-                        contentDescription = null,
+                        imageVector = Icons.Rounded.Tune,
+                        contentDescription = stringResource(R.string.lyrics_calibration_cd),
                         tint = Color.White,
-                        modifier = Modifier.size(18.dp),
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = stringResource(R.string.lyrics_relock_vocals),
-                        style = MaterialTheme.typography.labelLarge,
-                        color = Color.White,
+                        modifier = Modifier.size(21.dp),
                     )
                 }
-            }
-
-            // Acoustic Sync Calibration & FFT Telemetry Sheet button
-            LiquidGlassIconButton(
-                onClick = onOpenCalibration,
-                modifier = Modifier.testTag("lyrics_calibration_button"),
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.Tune,
-                    contentDescription = stringResource(R.string.lyrics_calibration_cd),
-                    tint = Color.White,
-                    modifier = Modifier.size(21.dp),
-                )
             }
         }
     }
+}
+
+@Composable
+private fun QuickNudgeChip(
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = modifier
+            .clip(RoundedCornerShape(50))
+            .background(Color.White.copy(alpha = 0.12f))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 4.dp),
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = Color.White.copy(alpha = 0.90f),
+        )
+    }
+}
+
+private fun formatDurationMs(ms: Long): String {
+    val totalSec = (ms / 1_000L).coerceAtLeast(0L)
+    val mins = totalSec / 60L
+    val secs = totalSec % 60L
+    return String.format("%d:%02d", mins, secs)
 }
 
 @Composable

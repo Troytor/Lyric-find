@@ -1,5 +1,6 @@
 package com.example.model
 
+import android.os.SystemClock
 import androidx.compose.runtime.Immutable
 
 @Immutable
@@ -25,7 +26,7 @@ data class LyricLine(
 
 enum class TimingSource {
     ENHANCED_LRC,
-    LOCAL_NEURAL_CADENCE_ENGINE,
+    PROSODIC_BEAT_ENGINE,
     PLAIN_ESTIMATED,
 }
 
@@ -63,6 +64,25 @@ data class SongCandidate(
 }
 
 @Immutable
+data class DevicePlayingTrack(
+    val title: String,
+    val artist: String,
+    val album: String = "",
+    val isPlaying: Boolean = true,
+    val positionMs: Long = 0L,
+    val durationMs: Long = 0L,
+    val sourceApp: String = "Phone Player",
+    val receivedAtElapsedMs: Long = SystemClock.elapsedRealtime(),
+) {
+    fun estimatedCurrentPositionMs(nowElapsedMs: Long = SystemClock.elapsedRealtime()): Long {
+        if (!isPlaying) return positionMs.coerceAtLeast(0L)
+        val delta = (nowElapsedMs - receivedAtElapsedMs).coerceAtLeast(0L)
+        val est = positionMs + delta
+        return if (durationMs > 0L) est.coerceIn(0L, durationMs) else est.coerceAtLeast(0L)
+    }
+}
+
+@Immutable
 data class AudioTelemetry(
     val amplitude: Float = 0f,
     val vocalEnergy: Float = 0f,
@@ -74,9 +94,6 @@ data class AudioTelemetry(
     val tempoLockRatio: Float = 1f,
     val beatCount: Int = 0,
     val isVocalActive: Boolean = false,
-    val neuralVocalProb: Float = 0f,
-    val neuralBeatProb: Float = 0f,
-    val neuralMusicProb: Float = 0f,
     val estimatedDriftMs: Long = 0L,
     val driftConfidence: Float = 0f,
     val isMusicPausedInRoom: Boolean = false,
@@ -89,8 +106,39 @@ enum class AppStage {
 
 enum class MicMode {
     IDLE,
+    RECORDING_FINGERPRINT,
     IDENTIFYING,
     MATCHING_ONLINE,
     RELOCKING_LINE,
     BEAT_SYNCING,
+}
+
+@Immutable
+data class TranslationLanguage(
+    val code: String,
+    val displayName: String,
+    val nativeName: String,
+)
+
+object SupportedTranslationLanguages {
+    val all: List<TranslationLanguage> = listOf(
+        TranslationLanguage("en", "English", "English"),
+        TranslationLanguage("es", "Spanish", "Español"),
+        TranslationLanguage("fr", "French", "Français"),
+        TranslationLanguage("pt", "Portuguese", "Português"),
+        TranslationLanguage("de", "German", "Deutsch"),
+        TranslationLanguage("it", "Italian", "Italiano"),
+        TranslationLanguage("ja", "Japanese", "日本語"),
+        TranslationLanguage("ko", "Korean", "한국어"),
+        TranslationLanguage("zh-CN", "Chinese", "中文"),
+        TranslationLanguage("ar", "Arabic", "العربية"),
+        TranslationLanguage("hi", "Hindi", "हिन्दी"),
+        TranslationLanguage("ru", "Russian", "Русский"),
+        TranslationLanguage("tr", "Turkish", "Türkçe"),
+        TranslationLanguage("vi", "Vietnamese", "Tiếng Việt"),
+        TranslationLanguage("tl", "Tagalog", "Tagalog"),
+    )
+
+    fun byCode(code: String?): TranslationLanguage =
+        all.firstOrNull { it.code.equals(code, ignoreCase = true) } ?: all.first()
 }
